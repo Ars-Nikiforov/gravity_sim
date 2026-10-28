@@ -11,8 +11,8 @@ use std::collections::HashSet;
 
 use eframe::egui;
 
-use crate::app::{barycenter, barycenter_filtered, ColorMode, FocusMode, GravityApp, Tool};
-use crate::physics::{Body, Command, Vec2, Vec3};
+use crate::app::{ColorMode, FocusMode, GravityApp, Tool, barycenter, barycenter_filtered};
+use crate::physics::{Body, Command, OrbitPlan, Region, Vec2, Vec3, orbit_plan};
 use crate::ui::{heatmap, overlays};
 
 /// Камера 2D: преобразование мир ↔ экран. `zoom` — пикселей на мировую единицу.
@@ -169,19 +169,17 @@ impl Camera3D {
         Some(eye + dir * t)
     }
 
-    /// Вращение вокруг цели.
+    /// Вращение вокруг цели. Возвышение ограничено сверху/снизу так, чтобы
+    /// камера всегда оставалась над плоскостью z = 0 (без «переворота»).
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * 0.01;
-        self.pitch = (self.pitch - dy * 0.01).clamp(-1.45, 1.45);
-        if self.pitch.abs() < 0.05 {
-            self.pitch = 0.05 * if self.pitch < 0.0 { -1.0 } else { 1.0 };
-        }
+        self.pitch = (self.pitch - dy * 0.01).clamp(0.08, 1.5);
     }
 
     /// Панорама: цель едет в плоскости камеры («хватаем» сцену мышью).
     pub fn pan(&mut self, rect: egui::Rect, dx: f32, dy: f32) {
-        let scale = 2.0 * self.distance * (self.fov_y as f64 * 0.5).tan()
-            / rect.height().max(1.0) as f64;
+        let scale =
+            2.0 * self.distance * (self.fov_y as f64 * 0.5).tan() / rect.height().max(1.0) as f64;
         let (right, up, _) = self.basis();
         self.target += right * (-dx as f64 * scale) + up * (dy as f64 * scale);
     }
@@ -263,7 +261,8 @@ fn lighten(c: egui::Color32, k: f32) -> egui::Color32 {
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
-    let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+    let (response, painter) =
+        ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
     let rect = response.rect;
 
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(10, 10, 16));
@@ -274,9 +273,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         let dt = ui.input(|i| i.unstable_dt).min(0.1);
         rp.advance(dt);
     }
-    let (bodies, running, step_ms, sim_time, tick, epoch) = if let Some(rp) = &app.replay {
+    let (bodies, running, step_ms, sim_time, tick, epoch, regions) = if let Some(rp) = &app.replay {
         let f = rp.current();
-        (f.bodies.clone(), rp.playing, 0.0, f.sim_time, f.tick, 0u64)
+        (
+            f.bodies.clone(),
+            rp.playing,
+            0.0,
+            f.sim_time,
+            f.tick,
+            0u64,
+            Vec::new(),
+        )
     } else {
         let snapshot = app.physics.snapshot();
         (
@@ -286,6 +293,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             snapshot.sim_time,
             snapshot.tick,
             snapshot.epoch,
+            snapshot.regions.clone(),
         )
     };
 
@@ -296,20 +304,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         app.prediction = None;
         app.selection.clear();
         app.selected_id = None;
+        app.orbit_host = None;
+        app.frame_pending = true;
     }
 
     // ── Камера: слежение/автоцентр/автомасштаб ──────────────────
-    update_camera(app, &bodies, rect);
+    let frame_dt = ui.input(|i| i.unstable_dt).clamp(1e-4, 0.1) as f64;
+    update_camera(app, &bodies, rect, frame_dt);
     // Держим 2D-центр и 3D-цель синхронными, чтобы переключение вида
     // не прыгало в начало координат.
     if app.view3d {
         app.camera.center = app.cam3d.target.xy();
     } else {
-        app.cam3d.target = Vec3::new(
-            app.camera.center.x,
-            app.camera.center.y,
-            app.cam3d.target.z,
-        );
+        app.cam3d.target = Vec3::new(app.camera.center.x, app.camera.center.y, app.cam3d.target.z);
     }
 
     let cam = app.camera;
@@ -384,10 +391,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     egui::Color32::from_rgba_unmultiplied(b.color[0], b.color[1], b.color[2], 70)
                 })
                 .unwrap_or(egui::Color32::GRAY);
-            let screen_points: Vec<egui::Pos2> =
-                points.iter().filter_map(|&p| project(p).map(|pr| pr.pos)).collect();
+            let screen_points: Vec<egui::Pos2> = points
+                .iter()
+                .filter_map(|&p| project(p).map(|pr| pr.pos))
+                .collect();
             if screen_points.len() >= 2 {
-                painter.add(egui::Shape::line(screen_points, egui::Stroke::new(1.0, color)));
+                painter.add(egui::Shape::line(
+                    screen_points,
+                    egui::Stroke::new(1.0, color),
+                ));
             }
         }
     }
@@ -446,6 +458,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         );
     }
 
+    // ── Области мультипольного разбиения ────────────────────────
+    if app.show_regions && !regions.is_empty() {
+        draw_regions(&painter, &|p| project(p).map(|pr| pr.pos), &regions);
+    }
+
     // ── Ускорения тел (для стрелок и раскраски) ─────────────────
     let accels: Vec<Vec3> = bodies
         .iter()
@@ -456,8 +473,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     let mut order: Vec<usize> = (0..bodies.len()).collect();
     if app.view3d {
         order.sort_by(|&i, &j| {
-            let di = project(bodies[i].pos).map(|p| p.depth).unwrap_or(f64::INFINITY);
-            let dj = project(bodies[j].pos).map(|p| p.depth).unwrap_or(f64::INFINITY);
+            let di = project(bodies[i].pos)
+                .map(|p| p.depth)
+                .unwrap_or(f64::INFINITY);
+            let dj = project(bodies[j].pos)
+                .map(|p| p.depth)
+                .unwrap_or(f64::INFINITY);
             dj.total_cmp(&di)
         });
     }
@@ -465,7 +486,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     let focal = cam3.focal(rect);
     for i in order {
         let body = &bodies[i];
-        let Some(pr) = project(body.pos) else { continue };
+        let Some(pr) = project(body.pos) else {
+            continue;
+        };
         let sp = pr.pos;
         if !rect.expand(60.0).contains(sp) {
             continue;
@@ -475,8 +498,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         } else {
             cam.zoom
         };
-        let radius = (body.radius * scale)
-            .clamp(2.0, rect.height().max(1.0) as f64 * 1.5) as f32;
+        let radius = (body.radius * scale).clamp(2.0, rect.height().max(1.0) as f64 * 1.5) as f32;
         if !radius.is_finite() {
             continue;
         }
@@ -539,7 +561,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     // ── Векторы сил ─────────────────────────────────────────────
     if app.show_forces {
         for (i, body) in bodies.iter().enumerate() {
-            let Some(pr) = project(body.pos) else { continue };
+            let Some(pr) = project(body.pos) else {
+                continue;
+            };
             if !rect.expand(20.0).contains(pr.pos) {
                 continue;
             }
@@ -550,7 +574,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             }
             let len = (mag.max(1e-6).log10() * 14.0 + 26.0).clamp(14.0, 120.0);
             let tip_world = body.pos + a * (len / mag);
-            let Some(pr_tip) = project(tip_world) else { continue };
+            let Some(pr_tip) = project(tip_world) else {
+                continue;
+            };
             let t = field_t(mag);
             painter.arrow(
                 pr.pos,
@@ -582,7 +608,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             )
         } else {
             format!(
-                "{mode} | UI: {:5.1} fps | физика: {:5.2} мс/шаг | тел: {} | t = {:.1}",
+                "{mode} | {} | UI: {:5.1} fps | физика: {:5.2} мс/шаг | тел: {} | t = {:.1}",
+                app.scenario.name(),
                 app.fps,
                 step_ms,
                 bodies.len(),
@@ -605,7 +632,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     // Подсказки по управлению и статус камеры.
     let mut hints = Vec::new();
     if app.view3d {
-        hints.push("ПКМ — орбита · ЛКМ — панорама · Shift+ЛКМ — рамка · колесо — зум");
+        hints.push("ЛКМ — орбита · ПКМ — панорама · Shift+ЛКМ — рамка · колесо — зум");
+    }
+    if app.tool == Tool::Orbit {
+        hints.push(if app.orbit_host.is_some() {
+            "Быстрая орбита: клик — разместить тело вокруг выбранной планеты"
+        } else {
+            "Быстрая орбита: клик по планете-хозяину"
+        });
     }
     if app.show_prediction && app.selected_id.is_none() {
         hints.push("Предсказание: выберите тело (клик или рамка)");
@@ -646,7 +680,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     if scroll != 0.0 && !over_well {
         if let Some(cursor) = cursor {
             if rect.contains(cursor) {
-                let factor = (scroll as f64 * 0.01).exp();
+                let factor = (scroll as f64 * 0.0025).exp();
                 if app.view3d {
                     // Зум к курсору: точка под курсором остаётся на месте.
                     let anchor = app.cam3d.unproject_view_plane(rect, cursor);
@@ -672,26 +706,27 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     {
         if let Some(p) = response.interact_pointer_pos() {
             app.box_select_start = Some(p);
-            app.box_select_additive =
-                ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+            app.box_select_additive = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
         }
     }
     let box_active = app.box_select_start.is_some();
 
     // Панорама/орбита (рамка выделения блокирует панораму).
-    let primary_pan = app.tool == Tool::Select
-        && response.dragged_by(egui::PointerButton::Primary)
-        && !over_well
-        && !shift;
+    let primary_pan = response.dragged_by(egui::PointerButton::Primary) && !over_well && !shift;
     let secondary_drag = response.dragged_by(egui::PointerButton::Secondary) && !over_well;
     let middle_drag = response.dragged_by(egui::PointerButton::Middle) && !over_well;
 
     if !box_active {
         if app.view3d {
-            if secondary_drag {
+            if primary_pan {
+                // ЛКМ — вращение вокруг цели (как в 3D-редакторах).
                 let d = response.drag_delta();
                 app.cam3d.orbit(d.x, d.y);
-            } else if primary_pan || middle_drag {
+                if app.focus_mode != FocusMode::Free {
+                    app.focus_mode = FocusMode::Free;
+                }
+            } else if secondary_drag || middle_drag {
+                // ПКМ/СКМ — панорама в плоскости камеры.
                 let d = response.drag_delta();
                 app.cam3d.pan(rect, d.x, d.y);
                 if app.focus_mode != FocusMode::Free {
@@ -778,21 +813,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     }
                 }
                 Tool::AddBody => {
-                    let world = if app.view3d {
-                        // Смотрим сверху — ставим на плоскость z=0; с ребра —
-                        // на плоскость взгляда (иначе клик уходит в бесконечность).
-                        let p = if app.cam3d.pitch > 0.45 {
-                            app.cam3d
-                                .unproject_ground(rect, pos)
-                                .unwrap_or_else(|| app.cam3d.unproject_view_plane(rect, pos))
-                        } else {
-                            app.cam3d.unproject_view_plane(rect, pos)
-                        };
-                        Some(p)
-                    } else {
-                        Some(cam.screen_to_world(rect, pos).to3())
-                    };
-                    if let Some(world) = world {
+                    if let Some(world) = click_world(app, rect, pos) {
                         let nb = app.new_body;
                         app.physics.send(Command::AddBody {
                             mass: nb.mass,
@@ -800,6 +821,32 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                             color: nb.color,
                             pos: world,
                         });
+                    }
+                }
+                Tool::Orbit => {
+                    if let Some(body) = hit {
+                        // Первый клик — выбрать хозяина орбиты.
+                        app.orbit_host = Some(body.id);
+                        app.selected_id = Some(body.id);
+                        app.selection.clear();
+                        app.selection.insert(body.id);
+                    } else if let Some(host_id) = app.orbit_host {
+                        if let Some(host_idx) = bodies.iter().position(|b| b.id == host_id) {
+                            if let Some(world) = click_world(app, rect, pos) {
+                                let nb = app.new_body;
+                                if let Some(plan) =
+                                    orbit_plan(&bodies, host_idx, world, nb.mass, app.params.g)
+                                {
+                                    app.physics.send(Command::AddBodyState {
+                                        mass: nb.mass,
+                                        radius: nb.radius,
+                                        color: nb.color,
+                                        pos: plan.pos,
+                                        vel: plan.vel,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 Tool::DeleteBody => {
@@ -823,13 +870,161 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             }
         }
     }
+
+    // ── Превью быстрой орбиты ──────────────────────────────────
+    if app.tool == Tool::Orbit && !over_well {
+        if let Some(cursor) = cursor.filter(|c| rect.contains(*c)) {
+            if let Some(host_id) = app.orbit_host {
+                if let Some(host_idx) = bodies.iter().position(|b| b.id == host_id) {
+                    let host = &bodies[host_idx];
+                    if let Some(pr) = project(host.pos) {
+                        painter.circle_stroke(
+                            pr.pos,
+                            9.0,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 235, 205)),
+                        );
+                    }
+                    if let Some(world) = click_world(app, rect, cursor) {
+                        if let Some(plan) =
+                            orbit_plan(&bodies, host_idx, world, app.new_body.mass, app.params.g)
+                        {
+                            draw_orbit_preview(
+                                &painter,
+                                &|p| project(p).map(|pr| pr.pos),
+                                host.pos,
+                                &plan,
+                            );
+                        }
+                    }
+                }
+            } else if let Some(body) = pick_body(&bodies, &project, cursor) {
+                if let Some(pr) = project(body.pos) {
+                    painter.circle_stroke(
+                        pr.pos,
+                        11.0,
+                        egui::Stroke::new(1.5, egui::Color32::from_rgb(150, 220, 255)),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Экран → мир для клика: сверху — на плоскость z = 0, с ребра — на
+/// плоскость взгляда (иначе луч уходит в бесконечность).
+fn click_world(app: &GravityApp, rect: egui::Rect, sp: egui::Pos2) -> Option<Vec3> {
+    if app.view3d {
+        if app.cam3d.pitch > 0.35 {
+            app.cam3d
+                .unproject_ground(rect, sp)
+                .or_else(|| Some(app.cam3d.unproject_view_plane(rect, sp)))
+        } else {
+            Some(app.cam3d.unproject_view_plane(rect, sp))
+        }
+    } else {
+        Some(app.camera.screen_to_world(rect, sp).to3())
+    }
+}
+
+/// Каркас областей мультипольного разбиения (12 рёбер каждого куба).
+fn draw_regions(
+    painter: &egui::Painter,
+    project: &dyn Fn(Vec3) -> Option<egui::Pos2>,
+    regions: &[Region],
+) {
+    for region in regions {
+        if region.bodies == 0 {
+            continue;
+        }
+        let h = region.half;
+        let c = region.center;
+        let corners: [Vec3; 8] = std::array::from_fn(|i| {
+            Vec3::new(
+                c.x + if i & 1 != 0 { h } else { -h },
+                c.y + if i & 2 != 0 { h } else { -h },
+                c.z + if i & 4 != 0 { h } else { -h },
+            )
+        });
+        let pts: [Option<egui::Pos2>; 8] = std::array::from_fn(|i| project(corners[i]));
+        let mass_term = region.mass.max(1e-9).log10() * 5.0;
+        let alpha =
+            (26.0 + mass_term + region.bodies.min(30) as f64 * 2.0).clamp(22.0, 110.0) as u8;
+        let stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(120, 170, 255, alpha),
+        );
+        for i in 0..8usize {
+            for bit in [1usize, 2, 4] {
+                if i & bit == 0 {
+                    if let (Some(a), Some(b)) = (pts[i], pts[i | bit]) {
+                        painter.line_segment([a, b], stroke);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Ортонормированный базис плоскости с нормалью `n`.
+fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
+    let helper = if n.z.abs() < 0.9 {
+        Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let u = helper.cross(n).normalized();
+    (u, n.cross(u).normalized())
+}
+
+/// Кольцо будущей орбиты и точка вставки.
+fn draw_orbit_preview(
+    painter: &egui::Painter,
+    project: &dyn Fn(Vec3) -> Option<egui::Pos2>,
+    center: Vec3,
+    plan: &OrbitPlan,
+) {
+    let (u, v) = plane_basis(plan.normal);
+    let n = 96;
+    let mut pts: Vec<Option<egui::Pos2>> = Vec::with_capacity(n + 1);
+    for k in 0..=n {
+        let a = std::f64::consts::TAU * k as f64 / n as f64;
+        pts.push(project(
+            center + u * (plan.radius * a.cos()) + v * (plan.radius * a.sin()),
+        ));
+    }
+    let color = egui::Color32::from_rgba_unmultiplied(120, 235, 205, 210);
+    for w in pts.windows(2) {
+        if let (Some(a), Some(b)) = (w[0], w[1]) {
+            painter.line_segment([a, b], egui::Stroke::new(1.5, color));
+        }
+    }
+    if let (Some(c), Some(p)) = (project(center), project(plan.pos)) {
+        painter.line_segment([c, p], egui::Stroke::new(1.0, color.gamma_multiply(0.55)));
+        painter.circle_filled(p, 3.6, color);
+    }
 }
 
 /// Подтягиваем камеру к цели слежения, автоцентру и автомасштабу.
-fn update_camera(app: &mut GravityApp, bodies: &[Body], rect: egui::Rect) {
+/// Сглаживание экспоненциальное и не зависит от частоты кадров.
+fn update_camera(app: &mut GravityApp, bodies: &[Body], rect: egui::Rect, dt: f64) {
     let view3d = app.view3d;
+    let dt = dt.clamp(1e-4, 0.1);
 
-    // 1. Слежение за телом/системой/выделением.
+    // 0. Кадрирование после сброса/загрузки пресета: сразу вписываем сцену,
+    //    без «прыжка» из начала координат на первых кадрах.
+    if app.frame_pending && !bodies.is_empty() {
+        let c = barycenter(bodies);
+        let radius = robust_radius(bodies, c, view3d);
+        app.camera.center = c.xy();
+        app.cam3d.target = c;
+        app.camera.zoom =
+            (rect.width().min(rect.height()) as f64 * 0.42 / radius).clamp(0.02, 40.0);
+        let fov = (app.cam3d.fov_y as f64).clamp(0.15, 2.8);
+        app.cam3d.distance = (radius / (fov * 0.5).tan()).clamp(10.0, 1.0e7) * 1.15;
+        app.frame_pending = false;
+    }
+
+    // 1. Слежение за телом/системой/выделением — плавно, с постоянной времени.
     let follow: Option<Vec3> = match app.focus_mode {
         FocusMode::Free => None,
         FocusMode::FollowSelected => app
@@ -846,11 +1041,11 @@ fn update_camera(app: &mut GravityApp, bodies: &[Body], rect: egui::Rect) {
         }
     };
     if let Some(t) = follow.filter(|p| p.is_finite()) {
-        let k = 0.18;
+        let k = smooth(dt, 0.12);
         app.cam3d.target = app.cam3d.target.lerp(t, k);
         app.camera.center = app.camera.center.lerp(t.xy(), k);
     } else if app.auto_center && !bodies.is_empty() {
-        // Мёртвая зона: не дёргаем камеру, пока система в кадре.
+        // Мёртвая зона: камера не дёргается, пока система в кадре.
         let c = barycenter(bodies);
         if c.is_finite() {
             let (visible, dist) = if view3d {
@@ -861,16 +1056,17 @@ fn update_camera(app: &mut GravityApp, bodies: &[Body], rect: egui::Rect) {
                     rect.width().min(rect.height()) as f64 * 0.5 / app.camera.zoom.max(1e-6);
                 (visible, c.xy().distance(app.camera.center))
             };
-            if dist > visible * 0.6 {
-                // Далеко улетели — «телепорт» ближе; чуть вышли — плавно.
-                let k = if dist > visible * 2.0 { 1.0 } else { 0.10 };
+            if dist > visible * 0.65 {
+                // Чем дальше, тем быстрее догоняем, но без телепорта.
+                let tau = if dist > visible * 2.0 { 0.22 } else { 0.45 };
+                let k = smooth(dt, tau);
                 app.cam3d.target = app.cam3d.target.lerp(c, k);
                 app.camera.center = app.camera.center.lerp(c.xy(), k);
             }
         }
     }
 
-    // 2. Автомасштаб: вписать 90% тел в кадр.
+    // 2. Автомасштаб: вписать ~90% тел, плавно.
     if app.auto_fit && !bodies.is_empty() {
         let center = if view3d {
             app.cam3d.target
@@ -878,16 +1074,22 @@ fn update_camera(app: &mut GravityApp, bodies: &[Body], rect: egui::Rect) {
             app.camera.center.to3()
         };
         let radius = robust_radius(bodies, center, view3d);
+        let k = smooth(dt, 0.35);
         if view3d {
-            let desired =
-                (radius / (app.cam3d.fov_y as f64 * 0.5).tan()).clamp(10.0, 1.0e7);
-            app.cam3d.distance += (desired - app.cam3d.distance) * 0.08;
+            let fov = (app.cam3d.fov_y as f64).clamp(0.15, 2.8);
+            let desired = (radius / (fov * 0.5).tan()).clamp(10.0, 1.0e7);
+            app.cam3d.distance += (desired - app.cam3d.distance) * k;
         } else {
-            let desired = (rect.width().min(rect.height()) as f64 * 0.42 / radius)
-                .clamp(0.02, 40.0);
-            app.camera.zoom += (desired - app.camera.zoom) * 0.08;
+            let desired =
+                (rect.width().min(rect.height()) as f64 * 0.42 / radius).clamp(0.02, 40.0);
+            app.camera.zoom += (desired - app.camera.zoom) * k;
         }
     }
+}
+
+/// Коэффициент экспоненциального сглаживания, независимый от FPS.
+fn smooth(dt: f64, tau: f64) -> f64 {
+    1.0 - (-dt / tau.max(1e-4)).exp()
 }
 
 /// Область мира на плоскости z = 0, которую покрывает тепловая карта.
@@ -1000,11 +1202,7 @@ fn update_prediction(app: &mut GravityApp, bodies: &[Body], tick: u64) {
     };
     let (steps, dt) = predict_step(app, bodies, focus);
     let pts = crate::physics::predict_path(bodies, app.params, focus, steps, dt);
-    app.prediction = Some(Prediction {
-        id: sel,
-        tick,
-        pts,
-    });
+    app.prediction = Some(Prediction { id: sel, tick, pts });
 }
 
 /// «Красивый» шаг сетки: 1/2/5 × 10^n.

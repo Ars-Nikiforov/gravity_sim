@@ -14,9 +14,9 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -245,7 +245,11 @@ fn writer_loop(rx: Receiver<LogRecord>, mut writer: BufWriter<File>, counter: Ar
 fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
-    let (h, mi, s) = ((rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32);
+    let (h, mi, s) = (
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
+    );
 
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

@@ -34,8 +34,8 @@ pub struct ReplayPlayer {
 impl ReplayPlayer {
     /// Загрузить лог и раскодировать в кадры.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("не удалось прочитать файл: {e}"))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("не удалось прочитать файл: {e}"))?;
         let mut frames = Vec::new();
         let mut current: HashMap<u64, BodyLog> = HashMap::new();
         let mut skipped = 0usize;
@@ -63,7 +63,11 @@ impl ReplayPlayer {
                     current = bodies.into_iter().map(|b| (b.id, b)).collect();
                     push_frame(&mut frames, record.tick, record.sim_time, &current);
                 }
-                RecordPayload::Delta { deltas, added, removed } => {
+                RecordPayload::Delta {
+                    deltas,
+                    added,
+                    removed,
+                } => {
                     for d in deltas {
                         if let Some(b) = current.get_mut(&d.id) {
                             b.x += d.dx;
@@ -153,7 +157,11 @@ fn push_frame(frames: &mut Vec<Frame>, tick: u64, sim_time: f64, current: &HashM
     let mut bodies: Vec<Body> = current.values().cloned().map(Body::from).collect();
     // Стабильный порядок по id — важен для следов и списка тел.
     bodies.sort_unstable_by_key(|b| b.id);
-    frames.push(Frame { tick, sim_time, bodies });
+    frames.push(Frame {
+        tick,
+        sim_time,
+        bodies,
+    });
 }
 
 /// Последний (по времени изменения) файл лога в каталоге logs/.

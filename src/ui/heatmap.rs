@@ -171,9 +171,15 @@ fn compute(
     let aspect = (width / height).clamp(1e-6, 1e6);
     let long = res.clamp(8, 256);
     let (cols, rows) = if aspect >= 1.0 {
-        (long + 1, ((long as f64 / aspect) as usize + 1).clamp(3, 256))
+        (
+            long + 1,
+            ((long as f64 / aspect) as usize + 1).clamp(3, 256),
+        )
     } else {
-        (((long as f64 * aspect) as usize + 1).clamp(3, 256), long + 1)
+        (
+            ((long as f64 * aspect) as usize + 1).clamp(3, 256),
+            long + 1,
+        )
     };
 
     let logs_rows: Vec<Vec<f32>> = (0..rows)
@@ -255,14 +261,7 @@ pub fn draw(
     let stale = state.cache.as_ref().map(|c| c.key != key).unwrap_or(true);
     if stale {
         state.cache = Some(compute(
-            bodies,
-            min,
-            max,
-            g,
-            softening,
-            state.kind,
-            state.res,
-            key,
+            bodies, min, max, g, softening, state.kind, state.res, key,
         ));
     }
     let Some(cache) = state.cache.as_ref() else {
@@ -282,12 +281,7 @@ pub fn draw(
         for i in 0..cols {
             let x = min.x + (max.x - min.x) * (i as f64 / (cols - 1) as f64);
             let p = project(Vec3::new(x, y, 0.0));
-            let p = p.map(|p| {
-                egui::pos2(
-                    p.x.clamp(-1.0e5, 1.0e5),
-                    p.y.clamp(-1.0e5, 1.0e5),
-                )
-            });
+            let p = p.map(|p| egui::pos2(p.x.clamp(-1.0e5, 1.0e5), p.y.clamp(-1.0e5, 1.0e5)));
             screen.push(p);
             if let Some(pos) = p {
                 let k = j * cols + i;
@@ -341,7 +335,12 @@ fn marching_squares(
     let mut out = Vec::new();
     for j in 0..rows.saturating_sub(1) {
         for i in 0..cols.saturating_sub(1) {
-            let ids = [j * cols + i, j * cols + i + 1, (j + 1) * cols + i + 1, (j + 1) * cols + i];
+            let ids = [
+                j * cols + i,
+                j * cols + i + 1,
+                (j + 1) * cols + i + 1,
+                (j + 1) * cols + i,
+            ];
             let (Some(p0), Some(p1), Some(p2), Some(p3)) =
                 (pos[ids[0]], pos[ids[1]], pos[ids[2]], pos[ids[3]])
             else {
@@ -376,13 +375,7 @@ fn marching_squares(
 }
 
 /// Компактная легенда: градиентная шкала и логарифмические границы.
-fn draw_legend(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    lo: f64,
-    hi: f64,
-    kind: FieldKind,
-) {
+fn draw_legend(painter: &egui::Painter, rect: egui::Rect, lo: f64, hi: f64, kind: FieldKind) {
     let (w, h) = (132.0_f32, 8.0_f32);
     let origin = egui::pos2(rect.left() + 12.0, rect.bottom() - 48.0);
     let steps = 32;
@@ -453,11 +446,35 @@ mod tests {
     #[test]
     fn field_falls_off_with_distance() {
         let bodies = pair_bodies();
-        let near = field_value(&bodies, Vec3::new(10.0, 0.0, 0.0), 1.0, 1.0, FieldKind::Acceleration);
-        let far = field_value(&bodies, Vec3::new(1000.0, 0.0, 0.0), 1.0, 1.0, FieldKind::Acceleration);
+        let near = field_value(
+            &bodies,
+            Vec3::new(10.0, 0.0, 0.0),
+            1.0,
+            1.0,
+            FieldKind::Acceleration,
+        );
+        let far = field_value(
+            &bodies,
+            Vec3::new(1000.0, 0.0, 0.0),
+            1.0,
+            1.0,
+            FieldKind::Acceleration,
+        );
         assert!(near > far);
-        let p_near = field_value(&bodies, Vec3::new(10.0, 0.0, 0.0), 1.0, 1.0, FieldKind::Potential);
-        let p_far = field_value(&bodies, Vec3::new(1000.0, 0.0, 0.0), 1.0, 1.0, FieldKind::Potential);
+        let p_near = field_value(
+            &bodies,
+            Vec3::new(10.0, 0.0, 0.0),
+            1.0,
+            1.0,
+            FieldKind::Potential,
+        );
+        let p_far = field_value(
+            &bodies,
+            Vec3::new(1000.0, 0.0, 0.0),
+            1.0,
+            1.0,
+            FieldKind::Potential,
+        );
         assert!(p_near > p_far);
     }
 

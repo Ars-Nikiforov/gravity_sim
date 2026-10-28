@@ -28,6 +28,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                         .small()
                         .weak(),
                 ),
+                Tool::Orbit => ui.label(
+                    egui::RichText::new(
+                        "1) клик по планете-хозяину\n\
+                         2) клик в стороне — тело на устойчивой орбите",
+                    )
+                    .small()
+                    .weak(),
+                ),
                 Tool::DeleteBody => {
                     ui.label(egui::RichText::new("Клик по телу — удалить").small().weak())
                 }
@@ -35,23 +43,52 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         });
 
         // ── Параметры нового тела ───────────────────────────────────
-        if app.tool == Tool::AddBody {
+        if app.tool == Tool::AddBody || app.tool == Tool::Orbit {
             ui.add_space(6.0);
             ui.group(|ui| {
-                ui.label("Новое тело:");
+                ui.label(if app.tool == Tool::Orbit {
+                    "Новое тело на орбите:"
+                } else {
+                    "Новое тело:"
+                });
                 ui.add(
                     egui::Slider::new(&mut app.new_body.mass, 0.1..=2000.0)
                         .logarithmic(true)
                         .text("Масса"),
                 );
-                ui.add(
-                    egui::Slider::new(&mut app.new_body.radius, 0.5..=20.0)
-                        .text("Радиус"),
-                );
+                ui.add(egui::Slider::new(&mut app.new_body.radius, 0.5..=20.0).text("Радиус"));
                 ui.horizontal(|ui| {
                     ui.label("Цвет:");
                     ui.color_edit_button_srgb(&mut app.new_body.color);
                 });
+                if app.tool == Tool::Orbit {
+                    match app.orbit_host.and_then(|id| {
+                        app.physics
+                            .snapshot()
+                            .bodies
+                            .iter()
+                            .find(|b| b.id == id)
+                            .map(|b| (b.id, b.mass))
+                    }) {
+                        Some((id, mass)) => {
+                            ui.label(
+                                egui::RichText::new(format!("Хозяин: #{id} (m = {mass:.1})"))
+                                    .small()
+                                    .weak(),
+                            );
+                            if ui.button("Сбросить хозяина").clicked() {
+                                app.orbit_host = None;
+                            }
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new("Хозяин не выбран — кликните по планете")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    }
+                }
             });
         }
 
@@ -60,10 +97,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         ui.group(|ui| {
             ui.label("Ход времени:");
             let speed_changed = ui
-                .add(
-                    egui::Slider::new(&mut app.params.speed, 0.0..=10.0)
-                        .text("Скорость, ×"),
-                )
+                .add(egui::Slider::new(&mut app.params.speed, 0.0..=10.0).text("Скорость, ×"))
                 .changed();
             if speed_changed {
                 app.send_params();
@@ -105,7 +139,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             ui.checkbox(&mut app.view3d, "3D-режим (перспектива)");
             if app.view3d {
                 ui.label(
-                    egui::RichText::new("ПКМ — вращение камеры,\nЛКМ — панорама, колесо — зум")
+                    egui::RichText::new("ЛКМ — орбита камеры,\nПКМ — панорама, колесо — зум")
                         .small()
                         .weak(),
                 );
@@ -131,13 +165,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                             }
                         });
                 });
-                ui.add(
-                    egui::Slider::new(&mut app.heatmap.res, 16..=128)
-                        .text("Разрешение"),
-                )
-                .on_hover_text(
-                    "Число ячеек по длинной стороне. Больше — детальнее, но дороже.",
-                );
+                ui.add(egui::Slider::new(&mut app.heatmap.res, 16..=128).text("Разрешение"))
+                    .on_hover_text(
+                        "Число ячеек по длинной стороне. Больше — детальнее, но дороже.",
+                    );
                 ui.checkbox(&mut app.heatmap.contours, "Изолинии уровней");
                 ui.label(
                     egui::RichText::new("Контраст подстраивается по перцентилям")
@@ -155,20 +186,33 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 );
             }
             ui.checkbox(&mut app.show_well3d, "3D-колодец (угол, в 2D)");
+            if app.params.algorithm == crate::physics::Algorithm::FastMultipole {
+                ui.checkbox(&mut app.show_regions, "Показывать области FMM");
+            }
             ui.horizontal(|ui| {
                 ui.label("Раскраска:");
                 egui::ComboBox::from_id_salt("color_mode")
                     .selected_text(app.color_mode.name())
                     .show_ui(ui, |ui| {
                         for mode in ColorMode::ALL {
-                            ui.selectable_value(
-                                &mut app.color_mode,
-                                mode,
-                                mode.name(),
-                            );
+                            ui.selectable_value(&mut app.color_mode, mode, mode.name());
                         }
                     });
             });
+        });
+
+        // ── Пресеты ─────────────────────────────────────────────────
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Пресеты:");
+            if ui.button("🖼 Галерея пресетов…").clicked() {
+                app.show_gallery = true;
+            }
+            ui.label(
+                egui::RichText::new("22 устойчивые конфигурации по категориям")
+                    .small()
+                    .weak(),
+            );
         });
 
         // ── Камера и слежение ───────────────────────────────────────
@@ -199,6 +243,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 app.camera = Default::default();
                 app.cam3d = Default::default();
                 app.focus_mode = FocusMode::Free;
+                app.frame_pending = true;
             }
             ui.label(
                 egui::RichText::new(
@@ -239,12 +284,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     }
                     if let Some(logger) = &app.logger {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "записей: {}",
-                                logger.record_count()
-                            ))
-                            .small()
-                            .weak(),
+                            egui::RichText::new(format!("записей: {}", logger.record_count()))
+                                .small()
+                                .weak(),
                         );
                     }
                 } else if ui.button("⏺ Запись").clicked() {
@@ -271,7 +313,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             });
             if let Some(err) = &app.replay_error {
                 if app.replay.is_none() {
-                    ui.label(egui::RichText::new(err).small().color(egui::Color32::LIGHT_RED));
+                    ui.label(
+                        egui::RichText::new(err)
+                            .small()
+                            .color(egui::Color32::LIGHT_RED),
+                    );
                 }
             }
         });

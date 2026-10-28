@@ -18,102 +18,142 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         // ── Статистика ──────────────────────────────────────────────
         ui.group(|ui| {
             ui.label("Статистика:");
-            egui::Grid::new("stats").num_columns(2).spacing([20.0, 4.0]).show(ui, |ui| {
-                ui.label("FPS интерфейса:");
-                ui.label(format!("{:5.1}", app.fps));
-                ui.end_row();
+            egui::Grid::new("stats")
+                .num_columns(2)
+                .spacing([20.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("FPS интерфейса:");
+                    ui.label(format!("{:5.1}", app.fps));
+                    ui.end_row();
 
-                ui.label("Шагов физики/с:");
-                let steps_per_sec = if app.params.dt > 0.0 {
-                    app.params.speed / app.params.dt
-                } else {
-                    0.0
-                };
-                ui.label(format!("{:5.0}", steps_per_sec));
-                ui.end_row();
+                    ui.label("Шагов физики/с:");
+                    let steps_per_sec = if app.params.dt > 0.0 {
+                        app.params.speed / app.params.dt
+                    } else {
+                        0.0
+                    };
+                    ui.label(format!("{:5.0}", steps_per_sec));
+                    ui.end_row();
 
-                ui.label("Шаг физики, мс:");
-                ui.label(format!("{:5.2}", snapshot.step_ms));
-                ui.end_row();
+                    ui.label("Шаг физики, мс:");
+                    ui.label(format!("{:5.2}", snapshot.step_ms));
+                    ui.end_row();
 
-                ui.label("Тел:");
-                ui.label(snapshot.bodies.len().to_string());
-                ui.end_row();
+                    ui.label("Тел:");
+                    ui.label(snapshot.bodies.len().to_string());
+                    ui.end_row();
 
-                ui.label("Тик:");
-                ui.label(snapshot.tick.to_string());
-                ui.end_row();
+                    if app.params.algorithm == Algorithm::FastMultipole {
+                        ui.label("Областей FMM:");
+                        ui.label(snapshot.regions.len().to_string());
+                        ui.end_row();
+                    }
 
-                ui.label("Время симуляции:");
-                ui.label(format!("{:8.1}", snapshot.sim_time));
-                ui.end_row();
+                    ui.label("Тик:");
+                    ui.label(snapshot.tick.to_string());
+                    ui.end_row();
 
-                ui.label("Алгоритм:");
-                ui.label(app.params.algorithm.name());
-                ui.end_row();
+                    ui.label("Время симуляции:");
+                    ui.label(format!("{:8.1}", snapshot.sim_time));
+                    ui.end_row();
 
-                ui.label("Состояние:");
-                ui.label(if snapshot.running {
-                    "расчёт"
-                } else {
-                    "пауза"
+                    ui.label("Алгоритм:");
+                    ui.label(app.params.algorithm.name());
+                    ui.end_row();
+
+                    ui.label("Состояние:");
+                    ui.label(if snapshot.running {
+                        "расчёт"
+                    } else {
+                        "пауза"
+                    });
+                    ui.end_row();
+
+                    ui.label("Фокус камеры:");
+                    ui.label(app.focus_mode.name());
+                    ui.end_row();
+
+                    ui.label("Выделено тел:");
+                    ui.label(app.selection.len().to_string());
+                    ui.end_row();
                 });
-                ui.end_row();
-
-                ui.label("Фокус камеры:");
-                ui.label(app.focus_mode.name());
-                ui.end_row();
-
-                ui.label("Выделено тел:");
-                ui.label(app.selection.len().to_string());
-                ui.end_row();
-            });
         });
 
         // ── Точки Лагранжа и сфера Хилла ────────────────────────────
-        if app.show_lagrange || app.show_hill {
-            ui.add_space(6.0);
-            ui.group(|ui| {
-                ui.label("Лагранж и Хилл:");
-                match overlays::dominant_pair(&snapshot.bodies) {
-                    Some(pair) => {
-                        let lag = overlays::lagrange(&pair);
-                        egui::Grid::new("lagrange_info")
-                            .num_columns(2)
-                            .spacing([16.0, 3.0])
-                            .show(ui, |ui| {
-                                ui.label("Пара:");
-                                ui.label(format!("#{} ↔ #{}", pair.id1, pair.id2));
-                                ui.end_row();
-                                ui.label("μ = m₂/(m₁+m₂):");
-                                ui.label(format!("{:.5}", lag.mu));
-                                ui.end_row();
-                                ui.label("R Хилла:");
-                                ui.label(format!("{:.2}", lag.hill2));
-                                ui.end_row();
-                                ui.label("L1 от вторичного:");
-                                ui.label(format!("{:.2}", (lag.l1 - pair.p2).len()));
-                                ui.end_row();
-                                ui.label("L2 от вторичного:");
-                                ui.label(format!("{:.2}", (lag.l2 - pair.p2).len()));
-                                ui.end_row();
-                            });
-                    }
-                    None => {
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Точки Лагранжа:");
+            match overlays::dominant_pair(&snapshot.bodies) {
+                Some(pair) => {
+                    let lag = overlays::lagrange(&pair);
+                    egui::Grid::new("lagrange_info")
+                        .num_columns(2)
+                        .spacing([16.0, 3.0])
+                        .show(ui, |ui| {
+                            ui.label("Пара:");
+                            ui.label(format!("#{} ↔ #{}", pair.id1, pair.id2));
+                            ui.end_row();
+                            ui.label("μ = m₂/(m₁+m₂):");
+                            ui.label(format!("{:.5}", lag.mu));
+                            ui.end_row();
+                            ui.label("R Хилла:");
+                            ui.label(format!("{:.2}", lag.hill2));
+                            ui.end_row();
+                            ui.label("L1 от вторичного:");
+                            ui.label(format!("{:.2}", (lag.l1 - pair.p2).len()));
+                            ui.end_row();
+                            ui.label("L2 от вторичного:");
+                            ui.label(format!("{:.2}", (lag.l2 - pair.p2).len()));
+                            ui.end_row();
+                        });
+                    ui.separator();
+                    ui.label(egui::RichText::new("Вставить тело из левой панели в точку:").small());
+                    ui.horizontal_wrapped(|ui| {
+                        for (label, p) in [
+                            ("L1", lag.l1),
+                            ("L2", lag.l2),
+                            ("L3", lag.l3),
+                            ("L4", lag.l4),
+                            ("L5", lag.l5),
+                        ] {
+                            let help = "Скорость: v барицентра + ω × (r − r_барицентра)";
+                            if ui.button(label).on_hover_text(help).clicked() {
+                                let nb = app.new_body;
+                                let vel = overlays::lagrange_velocity(&pair, p);
+                                app.physics.send(Command::AddBodyState {
+                                    mass: nb.mass,
+                                    radius: nb.radius,
+                                    color: nb.color,
+                                    pos: p,
+                                    vel,
+                                });
+                            }
+                        }
+                    });
+                    if !app.show_lagrange && !app.show_hill {
                         ui.label(
-                            egui::RichText::new("Нужно минимум два тела с массой")
-                                .small()
-                                .weak(),
+                            egui::RichText::new(
+                                "Показ точек/сферы Хилла — в левой панели или меню «Вид».",
+                            )
+                            .small()
+                            .weak(),
                         );
                     }
                 }
-                ui.label(
-                    egui::RichText::new("Круговая ограниченная задача трёх тел")
-                        .small()
-                        .weak(),
-                );
-            });
-        }
+                None => {
+                    ui.label(
+                        egui::RichText::new("Нужно минимум два тела с массой")
+                            .small()
+                            .weak(),
+                    );
+                }
+            }
+            ui.label(
+                egui::RichText::new("Круговая ограниченная задача трёх тел")
+                    .small()
+                    .weak(),
+            );
+        });
 
         // ── Параметры физики ────────────────────────────────────────
         ui.add_space(6.0);
@@ -123,6 +163,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             for algorithm in Algorithm::ALL {
                 changed |= ui
                     .radio_value(&mut app.params.algorithm, algorithm, algorithm.name())
+                    .on_hover_text(algorithm.hint())
                     .changed();
             }
             ui.add_space(4.0);
@@ -130,10 +171,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 .add(egui::Slider::new(&mut app.params.g, 0.0..=50.0).text("Гравитация G"))
                 .changed();
             changed |= ui
-                .add(
-                    egui::Slider::new(&mut app.params.dt, 0.001..=0.05)
-                        .text("Шаг dt"),
-                )
+                .add(egui::Slider::new(&mut app.params.dt, 0.001..=0.05).text("Шаг dt"))
                 .changed();
             changed |= ui
                 .add(
@@ -145,12 +183,34 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             ui.label("Интегратор:");
             for integrator in crate::physics::Integrator::ALL {
                 changed |= ui
-                    .radio_value(
-                        &mut app.params.integrator,
-                        integrator,
-                        integrator.name(),
-                    )
+                    .radio_value(&mut app.params.integrator, integrator, integrator.name())
                     .changed();
+            }
+            if app.params.algorithm == Algorithm::FastMultipole {
+                ui.separator();
+                ui.label("Мультипольное разложение:");
+                changed |= ui
+                    .add(egui::Slider::new(&mut app.params.fmm_theta, 0.2..=1.0).text("Угол θ"))
+                    .on_hover_text("Меньше θ — больше областей раскрывается, точнее и дороже.")
+                    .changed();
+                ui.horizontal(|ui| {
+                    ui.label("Порядок:");
+                    for (order, name) in [(0u8, "Монополь"), (1, "Диполь"), (2, "Квадруполь")]
+                    {
+                        changed |= ui
+                            .radio_value(&mut app.params.fmm_order, order, name)
+                            .changed();
+                    }
+                });
+                ui.checkbox(&mut app.show_regions, "Показать области на холсте");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Областей в последнем шаге: {}",
+                        snapshot.regions.len()
+                    ))
+                    .small()
+                    .weak(),
+                );
             }
             if changed {
                 app.send_params();
@@ -247,9 +307,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 }
                 None => {
                     ui.label(
-                        egui::RichText::new("Тело не выбрано.\nКликните по телу на холсте или в списке.")
-                            .small()
-                            .weak(),
+                        egui::RichText::new(
+                            "Тело не выбрано.\nКликните по телу на холсте или в списке.",
+                        )
+                        .small()
+                        .weak(),
                     );
                 }
             }
@@ -259,7 +321,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         ui.add_space(6.0);
         ui.group(|ui| {
             ui.label("Детерминированность:");
-            ui.label(format!("КС: {:016X}", crate::app::state_checksum(&snapshot.bodies)));
+            ui.label(format!(
+                "КС: {:016X}",
+                crate::app::state_checksum(&snapshot.bodies)
+            ));
             ui.label(
                 egui::RichText::new(
                     "Одинаковые запуски дают одинаковые контрольные суммы \

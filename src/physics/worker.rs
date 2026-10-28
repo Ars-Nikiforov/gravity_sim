@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::sim::{Body, Simulation};
 use super::vec::Vec3;
-use super::{Scenario, SimParams};
+use super::{Region, Scenario, SimParams};
 use crate::logging::{BodyDelta, BodyLog, LogMode, LogRecord, RecordPayload};
 
 /// Команды из интерфейса в поток физики.
@@ -31,6 +31,14 @@ pub enum Command {
         radius: f64,
         color: [u8; 3],
         pos: Vec3,
+    },
+    /// Добавить тело с заданным состоянием (точка Лагранжа, быстрая орбита).
+    AddBodyState {
+        mass: f64,
+        radius: f64,
+        color: [u8; 3],
+        pos: Vec3,
+        vel: Vec3,
     },
     RemoveBody(u64),
     SetBodyMass(u64, f64),
@@ -59,6 +67,8 @@ pub struct Snapshot {
     /// Поколение состояния: растёт при Reset/Clear/ReplaceState. UI по нему
     /// понимает, что id могли переиспользоваться, и сбрасывает следы.
     pub epoch: u64,
+    /// Листья мультипольного разбиения (пусто, если алгоритм не FMM).
+    pub regions: Vec<Region>,
 }
 
 struct Shared {
@@ -89,6 +99,7 @@ impl PhysicsWorker {
                 step_ms: 0.0,
                 running: true,
                 epoch: 0,
+                regions: Vec::new(),
             })),
         });
         let running = Arc::new(AtomicBool::new(true));
@@ -154,8 +165,7 @@ impl PhysicsWorker {
                     let log_due = log.mode != LogMode::Off
                         && log.tx.is_some()
                         && sim.tick() != log.last_logged_tick
-                        && (sim.tick() % log.every == 0
-                            || log.since_keyframe >= KEYFRAME_EVERY);
+                        && (sim.tick() % log.every == 0 || log.since_keyframe >= KEYFRAME_EVERY);
                     if log_due {
                         log.last_logged_tick = sim.tick();
                         let record = build_log_record(&mut log, &sim);
@@ -173,6 +183,7 @@ impl PhysicsWorker {
                             step_ms: sim.step_ms(),
                             running: is_running,
                             epoch,
+                            regions: sim.regions().to_vec(),
                         });
                         *thread_shared.snapshot.lock().unwrap() = snap;
                         ctx.request_repaint();
@@ -225,12 +236,23 @@ fn apply_command(sim: &mut Simulation, running: &AtomicBool, cmd: Command, log: 
             color,
             pos,
         } => sim.add_body_orbiting(mass, radius, color, pos),
+        Command::AddBodyState {
+            mass,
+            radius,
+            color,
+            pos,
+            vel,
+        } => sim.add_body_state(mass, radius, color, pos, vel),
         Command::RemoveBody(id) => sim.remove_body(id),
         Command::SetBodyMass(id, mass) => sim.set_body_mass(id, mass),
         Command::Clear => sim.clear(),
         Command::ReverseVelocities => sim.reverse_velocities(),
         Command::ReplaceState(bodies) => sim.replace_bodies(bodies),
-        Command::SetLogging { mode, every, sender } => {
+        Command::SetLogging {
+            mode,
+            every,
+            sender,
+        } => {
             log.mode = mode;
             log.every = every.max(1);
             log.tx = sender;
@@ -272,9 +294,8 @@ const KEYFRAME_EVERY: u32 = 600;
 /// Собрать запись лога: ключевой кадр или дельта.
 fn build_log_record(log: &mut LogState, sim: &Simulation) -> LogRecord {
     let bodies = sim.bodies();
-    let need_keyframe = log.mode == LogMode::Full
-        || log.last.is_none()
-        || log.since_keyframe >= KEYFRAME_EVERY;
+    let need_keyframe =
+        log.mode == LogMode::Full || log.last.is_none() || log.since_keyframe >= KEYFRAME_EVERY;
 
     let snapshot_last: HashMap<u64, (Vec3, Vec3)> =
         bodies.iter().map(|b| (b.id, (b.pos, b.vel))).collect();
@@ -328,6 +349,10 @@ fn build_log_record(log: &mut LogState, sim: &Simulation) -> LogRecord {
     };
 
     log.last = Some(snapshot_last);
-    log.since_keyframe = if need_keyframe { 0 } else { log.since_keyframe + 1 };
+    log.since_keyframe = if need_keyframe {
+        0
+    } else {
+        log.since_keyframe + 1
+    };
     record
 }

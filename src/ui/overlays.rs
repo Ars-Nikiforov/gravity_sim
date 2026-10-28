@@ -18,9 +18,11 @@ pub struct Pair {
     pub id1: u64,
     pub m1: f64,
     pub p1: Vec3,
+    pub v1: Vec3,
     pub id2: u64,
     pub m2: f64,
     pub p2: Vec3,
+    pub v2: Vec3,
     /// Нормаль плоскости относительного движения.
     pub normal: Vec3,
     pub separation: f64,
@@ -85,13 +87,31 @@ pub fn dominant_pair(bodies: &[Body]) -> Option<Pair> {
         id1: b1.id,
         m1: b1.mass,
         p1: b1.pos,
+        v1: b1.vel,
         id2: b2.id,
         m2: b2.mass,
         p2: b2.pos,
+        v2: b2.vel,
         normal,
         separation,
         barycenter,
     })
+}
+
+/// Скорость тела, покоящегося в точке Лагранжа `p`: скорость барицентра
+/// пары плюс вращение с угловой скоростью `ω = (rel × v_rel)/|rel|²`.
+pub fn lagrange_velocity(pair: &Pair, p: Vec3) -> Vec3 {
+    let rel = pair.p2 - pair.p1;
+    let vrel = pair.v2 - pair.v1;
+    let len2 = rel.len2().max(1e-12);
+    let omega = rel.cross(vrel) * (1.0 / len2);
+    let total = pair.m1 + pair.m2;
+    let vcm = if total > 1e-12 {
+        (pair.v1 * pair.m1 + pair.v2 * pair.m2) * (1.0 / total)
+    } else {
+        Vec3::ZERO
+    };
+    vcm + omega.cross(p - pair.barycenter)
 }
 
 /// Левая часть уравнения равновесия на оси (нормировка: расстояние = 1,
@@ -152,9 +172,7 @@ pub fn lagrange(pair: &Pair) -> Lagrange {
     // L4/L5 — равносторонние треугольники в плоскости движения.
     let rel = pair.p2 - pair.p1;
     let n = pair.normal;
-    let rotate = |v: Vec3, ang: f64| -> Vec3 {
-        v * ang.cos() + n.cross(v) * ang.sin()
-    };
+    let rotate = |v: Vec3, ang: f64| -> Vec3 { v * ang.cos() + n.cross(v) * ang.sin() };
     let l4 = pair.p1 + rotate(rel, std::f64::consts::FRAC_PI_3);
     let l5 = pair.p1 + rotate(rel, -std::f64::consts::FRAC_PI_3);
 

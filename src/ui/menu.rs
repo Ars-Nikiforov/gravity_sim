@@ -4,22 +4,16 @@
 use eframe::egui;
 
 use crate::app::{FocusMode, GravityApp};
-use crate::physics::{Command, Scenario};
+use crate::physics::{Command, PresetCategory, Scenario};
 
 pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("Файл", |ui| {
-            ui.label(egui::RichText::new("Загрузить сценарий").weak());
-            for scenario in Scenario::ALL {
-                if ui.button(scenario.name()).clicked() {
-                    app.reset(scenario);
-                }
-            }
-            ui.separator();
             if ui.button("Очистить холст").clicked() {
                 app.physics.send(Command::Clear);
                 app.trails.clear();
                 app.selected_id = None;
+                app.orbit_host = None;
             }
             ui.separator();
             if ui.button("Повтор последнего лога").clicked() {
@@ -32,6 +26,36 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             ui.separator();
             if ui.button("Выход").clicked() {
                 ui.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+
+        ui.menu_button("Сценарии", |ui| {
+            for category in PresetCategory::ALL {
+                ui.menu_button(category.name(), |ui| {
+                    ui.label(egui::RichText::new(category.hint()).small().weak());
+                    ui.separator();
+                    for scenario in Scenario::in_category(category) {
+                        let info = scenario.info();
+                        let response = ui.button(info.name).on_hover_text(format!(
+                            "{}\n\nУстойчивость: {} — {}",
+                            info.description,
+                            info.stability.label(),
+                            info.stability.hint()
+                        ));
+                        if response.clicked() {
+                            app.load_preset(scenario);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            ui.separator();
+            if ui.button("Галерея пресетов…").clicked() {
+                app.show_gallery = true;
+                ui.close();
+            }
+            if ui.button("Перезапустить текущий").clicked() {
+                app.reset(app.scenario);
             }
         });
 
@@ -78,6 +102,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 app.camera = Default::default();
                 app.cam3d = Default::default();
                 app.focus_mode = FocusMode::Free;
+                app.frame_pending = true;
             }
         });
 
@@ -104,10 +129,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         });
 
         ui.menu_button("Настройки", |ui| {
-            if ui
-                .checkbox(&mut app.dark_theme, "Тёмная тема")
-                .changed()
-            {
+            if ui.checkbox(&mut app.dark_theme, "Тёмная тема").changed() {
                 app.apply_theme(ui.ctx());
             }
             ui.separator();
@@ -115,15 +137,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         });
 
         ui.menu_button("Справка", |ui| {
-            ui.label("Гравитационный симулятор (заготовка интерфейса).");
+            ui.label("Гравитационный симулятор.");
             ui.separator();
             ui.label("Управление:");
             ui.label("• ЛКМ — применить инструмент");
-            ui.label("• ПКМ / drag — панорама камеры");
+            ui.label("• 3D: ЛКМ — орбита камеры, ПКМ — панорама");
+            ui.label("• 2D: drag — панорама");
             ui.label("• Колесо — зум к курсору");
-            ui.label("• Space — пауза/запуск");
-            ui.label("• Вид → Точки Лагранжа / Сфера Хилла");
-            ui.label("• Тепловая карта: поле, изолинии и разрешение — слева");
+            ui.label("• Space — пауза/запуск, R — обратить время");
+            ui.label("• Shift+ЛКМ — рамка выделения");
+            ui.label("• Сценарии → категория или галерея пресетов");
+            ui.label("• Точки Лагранжа: вставка L1–L5 справа");
             ui.label("• Физика считается в отдельном потоке");
         });
     });

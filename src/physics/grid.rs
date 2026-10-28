@@ -59,9 +59,11 @@ pub fn accel_grid(bodies: &[Body], pos: &[Vec3], g: f64, softening: f64) -> Vec<
     // Строим ячейки.
     let mut cells: BTreeMap<CellKey, Cell> = BTreeMap::new();
     for (i, b) in bodies.iter().enumerate() {
-        let e = cells
-            .entry(key_of(pos[i]))
-            .or_insert_with(|| Cell { idxs: Vec::new(), mass: 0.0, com: Vec3::ZERO });
+        let e = cells.entry(key_of(pos[i])).or_insert_with(|| Cell {
+            idxs: Vec::new(),
+            mass: 0.0,
+            com: Vec3::ZERO,
+        });
         e.idxs.push(i);
         e.mass += b.mass;
         e.com += pos[i] * b.mass;
@@ -96,8 +98,7 @@ pub fn accel_grid(bodies: &[Body], pos: &[Vec3], g: f64, softening: f64) -> Vec<
             }
             // Остальные ячейки — как точечные массы в их центрах масс.
             for (far_key, far) in &cells {
-                let (ddx, ddy, ddz) =
-                    (far_key.0 - key.0, far_key.1 - key.1, far_key.2 - key.2);
+                let (ddx, ddy, ddz) = (far_key.0 - key.0, far_key.1 - key.1, far_key.2 - key.2);
                 if ddx.abs() <= 1 && ddy.abs() <= 1 && ddz.abs() <= 1 {
                     continue;
                 }

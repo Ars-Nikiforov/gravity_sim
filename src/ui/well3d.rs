@@ -38,7 +38,11 @@ pub fn draw(
     );
 
     // Взаимодействие: drag вращает сетку.
-    let resp = ui.interact(rect, egui::Id::unique("well3d"), egui::Sense::click_and_drag());
+    let resp = ui.interact(
+        rect,
+        egui::Id::unique("well3d"),
+        egui::Sense::click_and_drag(),
+    );
     let now = ui.input(|i| i.time);
     if resp.dragged() {
         state.yaw += resp.drag_delta().x * 0.012;
@@ -57,14 +61,21 @@ pub fn draw(
     painter.rect_stroke(
         rect,
         5.0,
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(90, 120, 200, 120)),
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(90, 120, 200, 120),
+        ),
         egui::StrokeKind::Middle,
     );
 
     // Центр мини-вида — барицентр тел (только xy).
     let (mut m_sum, mut cx, mut cy) = (0.0_f64, 0.0_f64, 0.0_f64);
     for b in bodies {
-        let m = if b.mass.is_finite() { b.mass.max(1e-9) } else { 1e-9 };
+        let m = if b.mass.is_finite() {
+            b.mass.max(1e-9)
+        } else {
+            1e-9
+        };
         m_sum += m;
         cx += b.pos.x * m;
         cy += b.pos.y * m;
@@ -147,9 +158,8 @@ pub fn draw(
         painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, color)));
     };
 
-    let world = |i: usize, axis_len: f64| -> f64 {
-        (i as f64 / MESH as f64 - 0.5) * 2.0 * axis_len
-    };
+    let world =
+        |i: usize, axis_len: f64| -> f64 { (i as f64 / MESH as f64 - 0.5) * 2.0 * axis_len };
 
     for gy in 0..=MESH {
         let mut points = Vec::with_capacity(MESH + 1);

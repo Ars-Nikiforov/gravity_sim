@@ -18,11 +18,13 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::logging::{LogMode, Logger};
-use crate::physics::{Body, Command, PhysicsWorker, Scenario, SimParams, Vec3};
+use crate::physics::{
+    Body, Command, PhysicsWorker, PresetCategory, Scenario, SimParams, Stability, Vec3,
+};
 use crate::replay::{self, ReplayPlayer};
 use crate::ui::canvas::Camera3D;
 use crate::ui::heatmap::HeatmapState;
-use crate::ui::{canvas, left_panel, menu, right_panel, Camera};
+use crate::ui::{Camera, canvas, left_panel, menu, right_panel};
 
 /// Активный инструмент для левой кнопки мыши на холсте.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,9 @@ pub enum Tool {
     Select,
     /// Клик — добавить тело с орбитальной скоростью.
     AddBody,
+    /// Быстрая орбита: первый клик — планета-хозяин, второй — тело на
+    /// устойчивой круговой орбите вокруг неё.
+    Orbit,
     /// Клик по телу — удалить его.
     DeleteBody,
 }
@@ -40,11 +45,12 @@ impl Tool {
         match self {
             Tool::Select => "Выбор",
             Tool::AddBody => "Добавить тело",
+            Tool::Orbit => "Быстрая орбита",
             Tool::DeleteBody => "Удалить тело",
         }
     }
 
-    pub const ALL: [Tool; 3] = [Tool::Select, Tool::AddBody, Tool::DeleteBody];
+    pub const ALL: [Tool; 4] = [Tool::Select, Tool::AddBody, Tool::Orbit, Tool::DeleteBody];
 }
 
 /// Раскраска тел на холсте.
@@ -184,6 +190,16 @@ pub struct GravityApp {
     /// Следы орбит — чисто визуальная история на стороне UI.
     pub trails: HashMap<u64, VecDeque<Vec3>>,
     pub fps: f32,
+
+    // ── Новые возможности ────────────────────────────────────────
+    /// Окно галереи пресетов.
+    pub show_gallery: bool,
+    /// Кадрировать сцену на ближайшем кадре (после сброса/загрузки пресета).
+    pub frame_pending: bool,
+    /// Выбранная планета-хозяин для инструмента «Быстрая орбита».
+    pub orbit_host: Option<u64>,
+    /// Показывать листья мультипольного разбиения.
+    pub show_regions: bool,
 }
 
 impl GravityApp {
@@ -239,6 +255,10 @@ impl GravityApp {
             camera: Camera::default(),
             trails: HashMap::new(),
             fps: 0.0,
+            show_gallery: false,
+            frame_pending: true,
+            orbit_host: None,
+            show_regions: false,
         }
     }
 
@@ -262,6 +282,21 @@ impl GravityApp {
         self.camera = Camera::default();
         self.cam3d = Camera3D::default();
         self.focus_mode = FocusMode::Free;
+        self.frame_pending = true;
+        self.orbit_host = None;
+    }
+
+    /// Загрузить пресет: применить рекомендованные параметры интегрирования
+    /// и кадрировать сцену после появления первых тел.
+    pub fn load_preset(&mut self, scenario: Scenario) {
+        if let Some(rec) = scenario.info().recommended {
+            self.params.integrator = rec.integrator;
+            self.params.dt = rec.dt;
+            self.params.softening = rec.softening;
+            self.params.speed = rec.speed;
+            self.send_params();
+        }
+        self.reset(scenario);
     }
 
     /// Разово переместить камеру в точку мира.
@@ -307,8 +342,11 @@ impl GravityApp {
             Ok(logger) => {
                 let sender = logger.sender();
                 let (mode, every) = (self.log_mode, self.log_every);
-                self.physics
-                    .send(Command::SetLogging { mode, every, sender });
+                self.physics.send(Command::SetLogging {
+                    mode,
+                    every,
+                    sender,
+                });
                 self.logger = Some(logger);
             }
             Err(e) => {
@@ -345,6 +383,7 @@ impl GravityApp {
                 self.selected_id = None;
                 self.replay_error = None;
                 self.load_dialog = false;
+                self.frame_pending = true;
             }
             Err(e) => {
                 self.replay_error = Some(format!("{}: {e}", path.display()));
@@ -387,6 +426,84 @@ impl GravityApp {
         self.physics.set_running(true);
     }
 
+    /// Окно галереи пресетов (плавающее, с описаниями и устойчивостью).
+    fn show_gallery_window(&mut self, ctx: &egui::Context) {
+        if !self.show_gallery {
+            return;
+        }
+        let mut open = true;
+        let mut load: Option<Scenario> = None;
+        egui::Window::new("Галерея пресетов")
+            .open(&mut open)
+            .default_width(620.0)
+            .default_height(540.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Готовые конфигурации: от точных хореографий до иерархических \
+                         систем. Устойчивость указана по литературе и критериям Хилла.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for category in PresetCategory::ALL {
+                        ui.add_space(8.0);
+                        ui.heading(category.name());
+                        ui.label(egui::RichText::new(category.hint()).small().weak());
+                        for scenario in Scenario::in_category(category) {
+                            let info = scenario.info();
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.strong(info.name);
+                                    let color = match info.stability {
+                                        Stability::Stable => egui::Color32::from_rgb(120, 235, 160),
+                                        Stability::LongLived => {
+                                            egui::Color32::from_rgb(150, 210, 255)
+                                        }
+                                        Stability::WeaklyUnstable => {
+                                            egui::Color32::from_rgb(255, 200, 110)
+                                        }
+                                        Stability::Demo => egui::Color32::from_rgb(210, 170, 255),
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(info.stability.label())
+                                            .small()
+                                            .color(color),
+                                    )
+                                    .on_hover_text(info.stability.hint());
+                                    if ui.button("Загрузить").clicked() {
+                                        load = Some(scenario);
+                                    }
+                                });
+                                ui.label(egui::RichText::new(info.description).small());
+                                if let Some(rec) = info.recommended {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Рекомендуется: {} · dt {:.3} · ε² {:.1} · ×{:.1}",
+                                            rec.integrator.name(),
+                                            rec.dt,
+                                            rec.softening,
+                                            rec.speed
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                }
+                            });
+                        }
+                    }
+                });
+            });
+        if !open {
+            self.show_gallery = false;
+        }
+        if let Some(scenario) = load {
+            self.load_preset(scenario);
+            self.show_gallery = false;
+        }
+    }
+
     /// Окно управления повтором (плавающее поверх холста).
     fn show_replay_window(&mut self, ctx: &egui::Context) {
         if self.replay.is_none() {
@@ -414,9 +531,7 @@ impl GravityApp {
                     {
                         rp.playing = !rp.playing;
                     }
-                    ui.add(
-                        egui::Slider::new(&mut rp.speed, 0.1..=8.0).text("Скорость"),
-                    );
+                    ui.add(egui::Slider::new(&mut rp.speed, 0.1..=8.0).text("Скорость"));
                 });
                 let max = rp.len().saturating_sub(1);
                 if ui
@@ -434,12 +549,9 @@ impl GravityApp {
                 ));
                 if rp.skipped_lines > 0 {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "Пропущено битых строк: {}",
-                            rp.skipped_lines
-                        ))
-                        .small()
-                        .weak(),
+                        egui::RichText::new(format!("Пропущено битых строк: {}", rp.skipped_lines))
+                            .small()
+                            .weak(),
                     );
                 }
                 ui.separator();
@@ -527,10 +639,7 @@ pub fn barycenter(bodies: &[Body]) -> Vec3 {
 }
 
 /// Барицентр подмножества тел, прошедших фильтр.
-pub fn barycenter_filtered(
-    bodies: &[Body],
-    keep: impl Fn(&Body) -> bool,
-) -> Option<Vec3> {
+pub fn barycenter_filtered(bodies: &[Body], keep: impl Fn(&Body) -> bool) -> Option<Vec3> {
     let mut mass = 0.0;
     let mut sum = Vec3::ZERO;
     for b in bodies.iter().filter(|b| keep(*b)) {
@@ -588,5 +697,6 @@ impl eframe::App for GravityApp {
         // Плавающие окна поверх всего.
         self.show_replay_window(ui.ctx());
         self.show_load_dialog(ui.ctx());
+        self.show_gallery_window(ui.ctx());
     }
 }
