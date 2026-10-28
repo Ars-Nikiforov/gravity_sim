@@ -51,7 +51,8 @@ impl Algorithm {
                 "Равномерная сетка: ближние ячейки точно, дальние — точечной массой."
             }
             Algorithm::FastMultipole => {
-                "Октодерево + полиномиальные мультиполи. Области можно показать на холсте."
+                "Октодерево + дерево взаимодействий: моменты и списки листьев \
+                 переиспользуются между стадиями RK4. Выигрывает примерно с 1500 тел."
             }
         }
     }
@@ -194,6 +195,9 @@ pub struct Simulation {
     step_ms: f32,
     /// Листья октодерева последнего мультипольного шага (для отрисовки областей).
     last_regions: Vec<super::multipole::Region>,
+    /// Переиспользуемый FMM-решатель: дерево и списки взаимодействий живут
+    /// между шагами, поэтому после прогрева нет аллокаций на узел.
+    multipole: super::multipole::MultipoleSolver,
 }
 
 /// Способ расчёта ускорений в пределах шага.
@@ -214,6 +218,7 @@ impl Simulation {
             sim_time: 0.0,
             step_ms: 0.0,
             last_regions: Vec::new(),
+            multipole: super::multipole::MultipoleSolver::default(),
         };
         sim.reset(scenario);
         sim
@@ -363,7 +368,7 @@ impl Simulation {
 
     /// Ускорения в заданных позициях выбранным способом.
     fn accel_all(
-        &self,
+        &mut self,
         pos: &[Vec3],
         mode: ForceMode,
         regions: &mut Vec<super::multipole::Region>,
@@ -374,7 +379,7 @@ impl Simulation {
                 super::grid::accel_grid(&self.bodies, pos, self.params.g, self.params.softening)
             }
             ForceMode::Multipole => {
-                let result = super::multipole::accel_multipole(
+                let result = self.multipole.accel(
                     &self.bodies,
                     pos,
                     self.params.g,
@@ -641,6 +646,7 @@ pub fn predict_path(
         sim_time: 0.0,
         step_ms: 0.0,
         last_regions: Vec::new(),
+        multipole: super::multipole::MultipoleSolver::default(),
     };
     let mut path = Vec::with_capacity(steps);
     for _ in 0..steps {
