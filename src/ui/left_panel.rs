@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use crate::app::{GravityApp, Tool};
+use crate::app::{ColorMode, FocusMode, GravityApp, Tool};
 
 pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -93,11 +93,192 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 .small()
                 .weak(),
             );
+            if ui.button("⏪ Обратить время (R)").clicked() {
+                app.physics.send(crate::physics::Command::ReverseVelocities);
+            }
+        });
+
+        // ── Визуализация ────────────────────────────────────────────
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Визуализация:");
+            ui.checkbox(&mut app.view3d, "3D-режим (перспектива)");
+            if app.view3d {
+                ui.label(
+                    egui::RichText::new("ПКМ — вращение камеры,\nЛКМ — панорама, колесо — зум")
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.checkbox(&mut app.show_prediction, "Предсказание орбиты");
+            if app.show_prediction {
+                ui.label(
+                    egui::RichText::new("Пунктир — будущее выбранного тела")
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.checkbox(&mut app.show_forces, "Векторы сил");
+            ui.checkbox(&mut app.show_field_heatmap, "Тепловая карта поля");
+            if app.show_field_heatmap {
+                ui.horizontal(|ui| {
+                    ui.label("Поле:");
+                    egui::ComboBox::from_id_salt("field_kind")
+                        .selected_text(app.heatmap.kind.name())
+                        .show_ui(ui, |ui| {
+                            for kind in crate::ui::heatmap::FieldKind::ALL {
+                                ui.selectable_value(&mut app.heatmap.kind, kind, kind.name());
+                            }
+                        });
+                });
+                ui.add(
+                    egui::Slider::new(&mut app.heatmap.res, 16..=128)
+                        .text("Разрешение"),
+                )
+                .on_hover_text(
+                    "Число ячеек по длинной стороне. Больше — детальнее, но дороже.",
+                );
+                ui.checkbox(&mut app.heatmap.contours, "Изолинии уровней");
+                ui.label(
+                    egui::RichText::new("Контраст подстраивается по перцентилям")
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.checkbox(&mut app.show_lagrange, "Точки Лагранжа L1–L5");
+            ui.checkbox(&mut app.show_hill, "Сфера Хилла");
+            if app.show_lagrange || app.show_hill {
+                ui.label(
+                    egui::RichText::new("Считается для двух самых массивных тел")
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.checkbox(&mut app.show_well3d, "3D-колодец (угол, в 2D)");
+            ui.horizontal(|ui| {
+                ui.label("Раскраска:");
+                egui::ComboBox::from_id_salt("color_mode")
+                    .selected_text(app.color_mode.name())
+                    .show_ui(ui, |ui| {
+                        for mode in ColorMode::ALL {
+                            ui.selectable_value(
+                                &mut app.color_mode,
+                                mode,
+                                mode.name(),
+                            );
+                        }
+                    });
+            });
+        });
+
+        // ── Камера и слежение ───────────────────────────────────────
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Камера и слежение:");
+            ui.checkbox(&mut app.auto_center, "Автоцентр (не давать улетать)");
+            ui.checkbox(&mut app.auto_fit, "Авто-масштаб (вписать тела)");
+            ui.horizontal(|ui| {
+                if ui.button("Центр: система").clicked() {
+                    app.focus_system_once();
+                }
+                if ui.button("Центр: выбор").clicked() {
+                    app.focus_selection_once();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Режим:");
+                egui::ComboBox::from_id_salt("focus_mode")
+                    .selected_text(app.focus_mode.name())
+                    .show_ui(ui, |ui| {
+                        for mode in FocusMode::ALL {
+                            ui.selectable_value(&mut app.focus_mode, mode, mode.name());
+                        }
+                    });
+            });
+            if ui.button("Сбросить камеру").clicked() {
+                app.camera = Default::default();
+                app.cam3d = Default::default();
+                app.focus_mode = FocusMode::Free;
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Двойной клик по телу — навести камеру.\n\
+                     Shift+ЛКМ — рамка выделения области.",
+                )
+                .small()
+                .weak(),
+            );
+        });
+
+        // ── Логирование ─────────────────────────────────────────────
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Логирование:");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("log_mode")
+                    .selected_text(app.log_mode.name())
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            crate::logging::LogMode::Off,
+                            crate::logging::LogMode::Deltas,
+                            crate::logging::LogMode::Full,
+                        ] {
+                            ui.selectable_value(&mut app.log_mode, mode, mode.name());
+                        }
+                    });
+            });
+            ui.add(
+                egui::Slider::new(&mut app.log_every, 1..=100u64)
+                    .logarithmic(true)
+                    .text("Каждые N тиков"),
+            );
+            ui.horizontal(|ui| {
+                if app.logger.is_some() {
+                    if ui.button("⏹ Стоп").clicked() {
+                        app.stop_logging();
+                    }
+                    if let Some(logger) = &app.logger {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "записей: {}",
+                                logger.record_count()
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                } else if ui.button("⏺ Запись").clicked() {
+                    app.start_logging();
+                }
+            });
+            if let Some(logger) = &app.logger {
+                ui.label(
+                    egui::RichText::new(format!("{}", logger.file.display()))
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.separator();
+            ui.label("Повтор:");
+            ui.horizontal(|ui| {
+                if ui.button("Последний лог").clicked() {
+                    app.start_replay_latest();
+                }
+                if ui.button("Файл…").clicked() {
+                    app.load_dialog = true;
+                    app.replay_error = None;
+                }
+            });
+            if let Some(err) = &app.replay_error {
+                if app.replay.is_none() {
+                    ui.label(egui::RichText::new(err).small().color(egui::Color32::LIGHT_RED));
+                }
+            }
         });
 
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new("Пробел — пауза/пуск. Колесо мыши — зум.")
+            egui::RichText::new("Пробел — пауза/пуск. R — обратить время. Колесо мыши — зум.")
                 .small()
                 .weak(),
         );

@@ -8,14 +8,16 @@
 //!   через `Context::request_repaint` (Context потокобезопасен и клонируем).
 //! * Закрытие окна дропает handle → канал разрывается → поток завершается.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::sim::{Body, Simulation};
-use super::vec::Vec2;
+use super::vec::Vec3;
 use super::{Scenario, SimParams};
+use crate::logging::{BodyDelta, BodyLog, LogMode, LogRecord, RecordPayload};
 
 /// Команды из интерфейса в поток физики.
 pub enum Command {
@@ -28,11 +30,21 @@ pub enum Command {
         mass: f64,
         radius: f64,
         color: [u8; 3],
-        pos: Vec2,
+        pos: Vec3,
     },
     RemoveBody(u64),
     SetBodyMass(u64, f64),
     Clear,
+    /// Развернуть все скорости — система пойдёт назад по траектории.
+    ReverseVelocities,
+    /// Полная замена состояния (например, «продолжить с отметки лога»).
+    ReplaceState(Vec<Body>),
+    /// Настроить логирование: режим, период (в тиках) и канал писателя.
+    SetLogging {
+        mode: LogMode,
+        every: u64,
+        sender: Option<std::sync::mpsc::Sender<LogRecord>>,
+    },
 }
 
 /// Неизменяемый кадр состояния для отрисовки.
@@ -44,6 +56,9 @@ pub struct Snapshot {
     /// даже когда шаг дороже кадра.
     pub step_ms: f32,
     pub running: bool,
+    /// Поколение состояния: растёт при Reset/Clear/ReplaceState. UI по нему
+    /// понимает, что id могли переиспользоваться, и сбрасывает следы.
+    pub epoch: u64,
 }
 
 struct Shared {
@@ -73,6 +88,7 @@ impl PhysicsWorker {
                 tick: 0,
                 step_ms: 0.0,
                 running: true,
+                epoch: 0,
             })),
         });
         let running = Arc::new(AtomicBool::new(true));
@@ -86,6 +102,8 @@ impl PhysicsWorker {
                 // Аккумулятор переводит реальное время в симуляционное через params.speed.
                 let mut accumulator = 0.0_f64;
                 let mut last = Instant::now();
+                let mut log = LogState::default();
+                let mut epoch: u64 = 0;
 
                 loop {
                     let mut dirty = false;
@@ -94,7 +112,14 @@ impl PhysicsWorker {
                     loop {
                         match rx.try_recv() {
                             Ok(cmd) => {
-                                apply_command(&mut sim, &thread_running, cmd);
+                                let new_epoch = matches!(
+                                    &cmd,
+                                    Command::Reset(_) | Command::Clear | Command::ReplaceState(_)
+                                );
+                                apply_command(&mut sim, &thread_running, cmd, &mut log);
+                                if new_epoch {
+                                    epoch = epoch.wrapping_add(1);
+                                }
                                 dirty = true;
                             }
                             Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -125,7 +150,21 @@ impl PhysicsWorker {
                         }
                     }
 
-                    // 3. Публикуем свежий снапшот и просим UI перерисоваться.
+                    // 3. Логирование (не блокирует: запись делает другой поток).
+                    let log_due = log.mode != LogMode::Off
+                        && log.tx.is_some()
+                        && sim.tick() != log.last_logged_tick
+                        && (sim.tick() % log.every == 0
+                            || log.since_keyframe >= KEYFRAME_EVERY);
+                    if log_due {
+                        log.last_logged_tick = sim.tick();
+                        let record = build_log_record(&mut log, &sim);
+                        if let Some(tx) = &log.tx {
+                            let _ = tx.send(record);
+                        }
+                    }
+
+                    // 4. Публикуем свежий снапшот и просим UI перерисоваться.
                     if dirty {
                         let snap = Arc::new(Snapshot {
                             bodies: sim.bodies().to_vec(),
@@ -133,12 +172,13 @@ impl PhysicsWorker {
                             tick: sim.tick(),
                             step_ms: sim.step_ms(),
                             running: is_running,
+                            epoch,
                         });
                         *thread_shared.snapshot.lock().unwrap() = snap;
                         ctx.request_repaint();
                     }
 
-                    // 4. Спим до следующего тика.
+                    // 5. Спим до следующего тика.
                     let elapsed = last.elapsed();
                     if elapsed < TICK {
                         thread::sleep(TICK - elapsed);
@@ -173,7 +213,7 @@ impl PhysicsWorker {
     }
 }
 
-fn apply_command(sim: &mut Simulation, running: &AtomicBool, cmd: Command) {
+fn apply_command(sim: &mut Simulation, running: &AtomicBool, cmd: Command, log: &mut LogState) {
     match cmd {
         Command::SetParams(p) => sim.set_params(p),
         Command::SetRunning(r) => running.store(r, Ordering::Relaxed),
@@ -188,5 +228,106 @@ fn apply_command(sim: &mut Simulation, running: &AtomicBool, cmd: Command) {
         Command::RemoveBody(id) => sim.remove_body(id),
         Command::SetBodyMass(id, mass) => sim.set_body_mass(id, mass),
         Command::Clear => sim.clear(),
+        Command::ReverseVelocities => sim.reverse_velocities(),
+        Command::ReplaceState(bodies) => sim.replace_bodies(bodies),
+        Command::SetLogging { mode, every, sender } => {
+            log.mode = mode;
+            log.every = every.max(1);
+            log.tx = sender;
+            // Форсируем ключевой кадр при (пере)старте логирования.
+            log.last = None;
+            log.since_keyframe = KEYFRAME_EVERY;
+        }
     }
+}
+
+/// Состояние логирования на стороне потока физики.
+struct LogState {
+    mode: LogMode,
+    every: u64,
+    tx: Option<std::sync::mpsc::Sender<LogRecord>>,
+    /// Позиции/скорости на момент последней записи — база для дельт.
+    last: Option<HashMap<u64, (Vec3, Vec3)>>,
+    since_keyframe: u32,
+    /// Тик последней записи — не пишем один тик дважды.
+    last_logged_tick: u64,
+}
+
+impl Default for LogState {
+    fn default() -> Self {
+        Self {
+            mode: LogMode::Off,
+            every: 10,
+            tx: None,
+            last: None,
+            since_keyframe: KEYFRAME_EVERY,
+            last_logged_tick: u64::MAX,
+        }
+    }
+}
+
+/// Периодичность ключевых кадров внутри дельта-лога.
+const KEYFRAME_EVERY: u32 = 600;
+
+/// Собрать запись лога: ключевой кадр или дельта.
+fn build_log_record(log: &mut LogState, sim: &Simulation) -> LogRecord {
+    let bodies = sim.bodies();
+    let need_keyframe = log.mode == LogMode::Full
+        || log.last.is_none()
+        || log.since_keyframe >= KEYFRAME_EVERY;
+
+    let snapshot_last: HashMap<u64, (Vec3, Vec3)> =
+        bodies.iter().map(|b| (b.id, (b.pos, b.vel))).collect();
+
+    let record = if need_keyframe {
+        LogRecord::keyframe(sim.tick(), sim.sim_time(), bodies)
+    } else {
+        let last = log.last.as_ref().unwrap();
+        let mut deltas = Vec::new();
+        let mut added = Vec::new();
+        let mut present = std::collections::HashSet::new();
+        for b in bodies {
+            present.insert(b.id);
+            match last.get(&b.id) {
+                Some((lp, lv)) => {
+                    if b.pos != *lp || b.vel != *lv {
+                        deltas.push(BodyDelta {
+                            id: b.id,
+                            dx: b.pos.x - lp.x,
+                            dy: b.pos.y - lp.y,
+                            dz: b.pos.z - lp.z,
+                            dvx: b.vel.x - lv.x,
+                            dvy: b.vel.y - lv.y,
+                            dvz: b.vel.z - lv.z,
+                        });
+                    }
+                }
+                None => added.push(BodyLog::from(b)),
+            }
+        }
+        let removed: Vec<u64> = last
+            .keys()
+            .filter(|id| !present.contains(*id))
+            .copied()
+            .collect();
+
+        if added.len() * 2 > bodies.len() {
+            // Слишком много новых тел — ключевой кадр дешевле россыпи добавлений.
+            LogRecord::keyframe(sim.tick(), sim.sim_time(), bodies)
+        } else {
+            LogRecord {
+                tick: sim.tick(),
+                sim_time: sim.sim_time(),
+                payload: RecordPayload::Delta {
+                    deltas,
+                    added,
+                    removed,
+                },
+            }
+        }
+    };
+
+    log.last = Some(snapshot_last);
+    log.since_keyframe = if need_keyframe { 0 } else { log.since_keyframe + 1 };
+    record
 }

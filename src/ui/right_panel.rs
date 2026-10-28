@@ -5,6 +5,7 @@ use eframe::egui;
 
 use crate::app::GravityApp;
 use crate::physics::{Algorithm, Command};
+use crate::ui::overlays;
 
 pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     let snapshot = app.physics.snapshot();
@@ -58,8 +59,61 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     "пауза"
                 });
                 ui.end_row();
+
+                ui.label("Фокус камеры:");
+                ui.label(app.focus_mode.name());
+                ui.end_row();
+
+                ui.label("Выделено тел:");
+                ui.label(app.selection.len().to_string());
+                ui.end_row();
             });
         });
+
+        // ── Точки Лагранжа и сфера Хилла ────────────────────────────
+        if app.show_lagrange || app.show_hill {
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.label("Лагранж и Хилл:");
+                match overlays::dominant_pair(&snapshot.bodies) {
+                    Some(pair) => {
+                        let lag = overlays::lagrange(&pair);
+                        egui::Grid::new("lagrange_info")
+                            .num_columns(2)
+                            .spacing([16.0, 3.0])
+                            .show(ui, |ui| {
+                                ui.label("Пара:");
+                                ui.label(format!("#{} ↔ #{}", pair.id1, pair.id2));
+                                ui.end_row();
+                                ui.label("μ = m₂/(m₁+m₂):");
+                                ui.label(format!("{:.5}", lag.mu));
+                                ui.end_row();
+                                ui.label("R Хилла:");
+                                ui.label(format!("{:.2}", lag.hill2));
+                                ui.end_row();
+                                ui.label("L1 от вторичного:");
+                                ui.label(format!("{:.2}", (lag.l1 - pair.p2).len()));
+                                ui.end_row();
+                                ui.label("L2 от вторичного:");
+                                ui.label(format!("{:.2}", (lag.l2 - pair.p2).len()));
+                                ui.end_row();
+                            });
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("Нужно минимум два тела с массой")
+                                .small()
+                                .weak(),
+                        );
+                    }
+                }
+                ui.label(
+                    egui::RichText::new("Круговая ограниченная задача трёх тел")
+                        .small()
+                        .weak(),
+                );
+            });
+        }
 
         // ── Параметры физики ────────────────────────────────────────
         ui.add_space(6.0);
@@ -87,6 +141,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                         .text("Сглаживание ε²"),
                 )
                 .changed();
+            ui.add_space(4.0);
+            ui.label("Интегратор:");
+            for integrator in crate::physics::Integrator::ALL {
+                changed |= ui
+                    .radio_value(
+                        &mut app.params.integrator,
+                        integrator,
+                        integrator.name(),
+                    )
+                    .changed();
+            }
             if changed {
                 app.send_params();
             }
@@ -113,6 +178,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                         ));
                         if ui.selectable_label(selected, row).clicked() {
                             app.selected_id = Some(body.id);
+                            app.selection.clear();
+                            app.selection.insert(body.id);
                         }
                     }
                 });
@@ -145,13 +212,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                         .spacing([20.0, 4.0])
                         .show(ui, |ui| {
                             ui.label("Позиция:");
-                            ui.label(format!("({:7.1}, {:7.1})", body.pos.x, body.pos.y));
+                            ui.label(format!(
+                                "({:7.1}, {:7.1}, {:7.1})",
+                                body.pos.x, body.pos.y, body.pos.z
+                            ));
                             ui.end_row();
                             ui.label("Скорость:");
                             ui.label(format!(
-                                "({:6.2}, {:6.2})  |v| = {:5.2}",
+                                "({:6.2}, {:6.2}, {:6.2})  |v| = {:5.2}",
                                 body.vel.x,
                                 body.vel.y,
+                                body.vel.z,
                                 body.vel.len()
                             ));
                             ui.end_row();
@@ -159,8 +230,18 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                             ui.label(format!("{:.1}", body.radius));
                             ui.end_row();
                         });
+                    ui.horizontal(|ui| {
+                        if ui.button("Навести камеру").clicked() {
+                            app.focus_point_once(body.pos);
+                        }
+                        if ui.button("Следить").clicked() {
+                            app.selected_id = Some(body.id);
+                            app.focus_mode = crate::app::FocusMode::FollowSelected;
+                        }
+                    });
                     if ui.button("Удалить тело").clicked() {
                         app.physics.send(Command::RemoveBody(body.id));
+                        app.selection.remove(&body.id);
                         app.selected_id = None;
                     }
                 }
@@ -172,6 +253,21 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     );
                 }
             }
+        });
+
+        // ── Детерминированность ─────────────────────────────────────
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Детерминированность:");
+            ui.label(format!("КС: {:016X}", crate::app::state_checksum(&snapshot.bodies)));
+            ui.label(
+                egui::RichText::new(
+                    "Одинаковые запуски дают одинаковые контрольные суммы \
+                     (порядок обхода фиксирован, без плавающего параллелизма).",
+                )
+                .small()
+                .weak(),
+            );
         });
     });
 }
