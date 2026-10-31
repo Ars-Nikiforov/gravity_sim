@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::sim::{Body, Simulation};
 use super::vec::Vec3;
-use super::{Region, Scenario, SimParams};
+use super::{profiler::StageStat, Region, Scenario, SimParams};
 use crate::logging::{BodyDelta, BodyLog, LogMode, LogRecord, RecordPayload};
 
 /// Команды из интерфейса в поток физики.
@@ -69,6 +69,8 @@ pub struct Snapshot {
     pub epoch: u64,
     /// Листья мультипольного разбиения (пусто, если алгоритм не FMM).
     pub regions: Vec<Region>,
+    /// Профилирование этапов последнего шага (имя, мс, количество).
+    pub profile: Vec<StageStat>,
 }
 
 struct Shared {
@@ -100,6 +102,7 @@ impl PhysicsWorker {
                 running: true,
                 epoch: 0,
                 regions: Vec::new(),
+                profile: Vec::new(),
             })),
         });
         let running = Arc::new(AtomicBool::new(true));
@@ -184,6 +187,7 @@ impl PhysicsWorker {
                             running: is_running,
                             epoch,
                             regions: sim.regions().to_vec(),
+                            profile: sim.profiler.stages().to_vec(),
                         });
                         *thread_shared.snapshot.lock().unwrap() = snap;
                         ctx.request_repaint();

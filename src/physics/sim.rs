@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use super::profiler::StageStat;
 use super::vec::Vec3;
 
 #[derive(Clone, Debug)]
@@ -198,6 +199,8 @@ pub struct Simulation {
     /// Переиспользуемый FMM-решатель: дерево и списки взаимодействий живут
     /// между шагами, поэтому после прогрева нет аллокаций на узел.
     multipole: super::multipole::MultipoleSolver,
+    /// Профилировщик этапов шага (дерево, списки, силы, интегрирование).
+    profiler: super::profiler::Profiler,
 }
 
 /// Способ расчёта ускорений в пределах шага.
@@ -219,6 +222,7 @@ impl Simulation {
             step_ms: 0.0,
             last_regions: Vec::new(),
             multipole: super::multipole::MultipoleSolver::default(),
+            profiler: super::profiler::Profiler::new(),
         };
         sim.reset(scenario);
         sim
@@ -260,6 +264,11 @@ impl Simulation {
     /// Листья последнего мультипольного разбиения (пусто для других алгоритмов).
     pub fn regions(&self) -> &[super::multipole::Region] {
         &self.last_regions
+    }
+
+    /// Статистика этапов профилировщика последнего шага.
+    pub fn profiler_stages(&self) -> &[StageStat] {
+        self.profiler.stages()
     }
 
     /// Индекс самого массивного тела.
@@ -346,24 +355,28 @@ impl Simulation {
 
     /// Один шаг интегрирования текущим алгоритмом.
     pub fn step(&mut self) {
-        let started = Instant::now();
-        match self.params.algorithm {
-            Algorithm::BruteForce | Algorithm::BarnesHut => self.integrate(ForceMode::Brute),
-            Algorithm::GridCells => self.integrate(ForceMode::Grid),
-            Algorithm::FastMultipole => self.integrate(ForceMode::Multipole),
-            Algorithm::FixedOrbits => {
-                self.last_regions.clear();
-                self.step_fixed_orbits();
+        self.profiler.measure("шаг физики", || {
+            let started = Instant::now();
+            match self.params.algorithm {
+                Algorithm::BruteForce | Algorithm::BarnesHut => {
+                    self.integrate(ForceMode::Brute);
+                }
+                Algorithm::GridCells => self.integrate(ForceMode::Grid),
+                Algorithm::FastMultipole => self.integrate(ForceMode::Multipole),
+                Algorithm::FixedOrbits => {
+                    self.last_regions.clear();
+                    self.step_fixed_orbits();
+                }
             }
-        }
-        let ms = started.elapsed().as_secs_f32() * 1000.0;
-        self.step_ms = if self.step_ms == 0.0 {
-            ms
-        } else {
-            self.step_ms * 0.9 + ms * 0.1
-        };
-        self.sim_time += self.params.dt;
-        self.tick += 1;
+            let ms = started.elapsed().as_secs_f32() * 1000.0;
+            self.step_ms = if self.step_ms == 0.0 {
+                ms
+            } else {
+                self.step_ms * 0.9 + ms * 0.1
+            };
+            self.sim_time += self.params.dt;
+            self.tick += 1;
+        });
     }
 
     /// Ускорения в заданных позициях выбранным способом.
@@ -397,56 +410,60 @@ impl Simulation {
     fn integrate(&mut self, mode: ForceMode) {
         let positions: Vec<Vec3> = self.bodies.iter().map(|b| b.pos).collect();
         let mut regions = Vec::new();
-        match self.params.integrator {
-            Integrator::SymplecticEuler => {
-                let acc = self.accel_all(&positions, mode, &mut regions);
-                let dt = self.params.dt;
-                for (b, a) in self.bodies.iter_mut().zip(acc) {
-                    b.vel += a * dt;
-                    b.pos += b.vel * dt;
+        let acc = self.profiler.measure("ускорения", || {
+            self.accel_all(&positions, mode, &mut regions)
+        });
+        self.profiler.measure("интегрирование", || {
+            match self.params.integrator {
+                Integrator::SymplecticEuler => {
+                    let dt = self.params.dt;
+                    for (b, a) in self.bodies.iter_mut().zip(acc) {
+                        b.vel += a * dt;
+                        b.pos += b.vel * dt;
+                    }
+                }
+                Integrator::PolynomialRK4 => {
+                    // Классический RK4 для системы y = (pos, vel), y' = (vel, a(pos)).
+                    let dt = self.params.dt;
+                    let mut pos = positions;
+                    let mut vel: Vec<Vec3> = self.bodies.iter().map(|b| b.vel).collect();
+
+                    let a1 = acc;
+                    let mut p2 = pos.clone();
+                    for i in 0..pos.len() {
+                        p2[i] = pos[i] + vel[i] * (dt * 0.5);
+                    }
+                    let a2 = self.accel_all(&p2, mode, &mut regions);
+                    let v2: Vec<Vec3> = (0..pos.len())
+                        .map(|i| vel[i] + a1[i] * (dt * 0.5))
+                        .collect();
+                    let mut p3 = pos.clone();
+                    for i in 0..pos.len() {
+                        p3[i] = pos[i] + v2[i] * (dt * 0.5);
+                    }
+                    let a3 = self.accel_all(&p3, mode, &mut regions);
+                    let v3: Vec<Vec3> = (0..pos.len())
+                        .map(|i| vel[i] + a2[i] * (dt * 0.5))
+                        .collect();
+                    let mut p4 = pos.clone();
+                    for i in 0..pos.len() {
+                        p4[i] = pos[i] + v3[i] * dt;
+                    }
+                    let a4 = self.accel_all(&p4, mode, &mut regions);
+                    let v4: Vec<Vec3> = (0..pos.len()).map(|i| vel[i] + a3[i] * dt).collect();
+
+                    for i in 0..pos.len() {
+                        let sixth = dt / 6.0;
+                        pos[i] += (vel[i] + v2[i] * 2.0 + v3[i] * 2.0 + v4[i]) * sixth;
+                        vel[i] += (a1[i] + a2[i] * 2.0 + a3[i] * 2.0 + a4[i]) * sixth;
+                    }
+                    for (b, i) in self.bodies.iter_mut().zip(0..pos.len()) {
+                        b.pos = pos[i];
+                        b.vel = vel[i];
+                    }
                 }
             }
-            Integrator::PolynomialRK4 => {
-                // Классический RK4 для системы y = (pos, vel), y' = (vel, a(pos)).
-                let dt = self.params.dt;
-                let mut pos = positions;
-                let mut vel: Vec<Vec3> = self.bodies.iter().map(|b| b.vel).collect();
-
-                let a1 = self.accel_all(&pos, mode, &mut regions);
-                let mut p2 = pos.clone();
-                for i in 0..pos.len() {
-                    p2[i] = pos[i] + vel[i] * (dt * 0.5);
-                }
-                let a2 = self.accel_all(&p2, mode, &mut regions);
-                let v2: Vec<Vec3> = (0..pos.len())
-                    .map(|i| vel[i] + a1[i] * (dt * 0.5))
-                    .collect();
-                let mut p3 = pos.clone();
-                for i in 0..pos.len() {
-                    p3[i] = pos[i] + v2[i] * (dt * 0.5);
-                }
-                let a3 = self.accel_all(&p3, mode, &mut regions);
-                let v3: Vec<Vec3> = (0..pos.len())
-                    .map(|i| vel[i] + a2[i] * (dt * 0.5))
-                    .collect();
-                let mut p4 = pos.clone();
-                for i in 0..pos.len() {
-                    p4[i] = pos[i] + v3[i] * dt;
-                }
-                let a4 = self.accel_all(&p4, mode, &mut regions);
-                let v4: Vec<Vec3> = (0..pos.len()).map(|i| vel[i] + a3[i] * dt).collect();
-
-                for i in 0..pos.len() {
-                    let sixth = dt / 6.0;
-                    pos[i] += (vel[i] + v2[i] * 2.0 + v3[i] * 2.0 + v4[i]) * sixth;
-                    vel[i] += (a1[i] + a2[i] * 2.0 + a3[i] * 2.0 + a4[i]) * sixth;
-                }
-                for (b, i) in self.bodies.iter_mut().zip(0..pos.len()) {
-                    b.pos = pos[i];
-                    b.vel = vel[i];
-                }
-            }
-        }
+        });
         if mode == ForceMode::Multipole {
             self.last_regions = regions;
         } else {
@@ -647,6 +664,7 @@ pub fn predict_path(
         step_ms: 0.0,
         last_regions: Vec::new(),
         multipole: super::multipole::MultipoleSolver::default(),
+        profiler: super::profiler::Profiler::new(),
     };
     let mut path = Vec::with_capacity(steps);
     for _ in 0..steps {

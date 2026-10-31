@@ -51,6 +51,7 @@
 //! обход стека — тоже, поэтому одинаковая конфигурация даёт бит-в-бит
 //! одинаковый результат.
 
+use super::profiler::Profiler;
 use super::sim::Body;
 use super::vec::Vec3;
 
@@ -227,6 +228,8 @@ pub struct MultipoleSolver {
     stack: Vec<u32>,
     acc: Vec<Vec3>,
     regions: Vec<Region>,
+    /// Профилировщик этапов: дерево, списки, вычисление.
+    profiler: Profiler,
 }
 
 impl MultipoleSolver {
@@ -259,9 +262,13 @@ impl MultipoleSolver {
         // RK4 двигает только пробные точки: источники внутри шага неизменны.
         // Поэтому дерево, моменты и списки строятся один раз на шаг.
         if !self.cache_matches(bodies, g, theta) {
-            self.prepare_sources(bodies, g);
-            self.build(bodies, g);
-            self.build_interaction_lists(theta);
+            self.profiler.measure("FMM: дерево", || {
+                self.prepare_sources(bodies, g);
+                self.build(bodies, g);
+            });
+            self.profiler.measure("FMM: списки", || {
+                self.build_interaction_lists(theta);
+            });
             self.cached_g = g;
             self.cached_theta = theta;
             self.cache_valid = true;
@@ -269,7 +276,9 @@ impl MultipoleSolver {
 
         // Основной путь: обход по листьям. Далёкий узел загружается один раз
         // и применяется ко всем целям листа, ближнее тело — тоже.
-        self.sum_leaves(positions, softening, order);
+        self.profiler.measure("FMM: расчёт сил", || {
+            self.sum_leaves(positions, softening, order);
+        });
 
         // Точки сверх числа тел (нестандартный вызов) считаем точечно.
         for i in bodies.len()..positions.len() {

@@ -3,12 +3,14 @@
 pub mod grid;
 pub mod multipole;
 pub mod presets;
+pub mod profiler;
 pub mod sim;
 pub mod vec;
 pub mod worker;
 
 pub use multipole::Region;
 pub use presets::{PresetCategory, Stability};
+pub use profiler::{Profiler, StageStat};
 pub use sim::{
     Algorithm, Body, Integrator, OrbitPlan, Scenario, SimParams, orbit_plan, predict_path,
 };
