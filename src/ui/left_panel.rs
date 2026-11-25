@@ -215,6 +215,31 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             });
         });
 
+        // ── Размер планет на экране ─────────────────────────────────
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label("Размер тел:");
+            ui.add(egui::Slider::new(&mut app.planet_size, 0.5..=6.0).text("Планеты, ×"))
+                .on_hover_text(
+                    "Множитель радиуса планет по умолчанию. Солнце и другие звёзды \
+                     (масса ≥ 100) не масштабируются. Индивидуальный размер тела — \
+                     в инспекторе, блок «Свойства тела».",
+                );
+            ui.horizontal(|ui| {
+                if ui.button("×1").clicked() {
+                    app.planet_size = 1.0;
+                }
+                if ui.button("По умолчанию (×2)").clicked() {
+                    app.planet_size = crate::app::DEFAULT_PLANET_SIZE;
+                }
+            });
+            ui.label(
+                egui::RichText::new("Индивидуально — в инспекторе справа")
+                    .small()
+                    .weak(),
+            );
+        });
+
         // ── Пресеты ─────────────────────────────────────────────────
         ui.add_space(6.0);
         ui.group(|ui| {

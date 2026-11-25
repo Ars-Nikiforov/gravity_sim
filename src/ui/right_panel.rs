@@ -287,6 +287,34 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     {
                         app.physics.send(Command::SetBodyMass(body.id, mass));
                     }
+                    let mut scale = app.body_display_scale(&body);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut scale, 0.25..=8.0)
+                                .text("Размер на экране, ×"),
+                        )
+                        .on_hover_text(
+                            "Индивидуальный множитель радиуса этого тела на холсте. \
+                             Не влияет на физику.",
+                        )
+                        .changed()
+                    {
+                        app.body_scale.insert(body.id, scale);
+                    }
+                    ui.horizontal(|ui| {
+                        let default_scale =
+                            crate::app::default_body_scale(&body, app.planet_size);
+                        if app.body_scale.contains_key(&body.id) {
+                            if ui.button("Сбросить размер").clicked() {
+                                app.body_scale.remove(&body.id);
+                            }
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("по умолчанию ×{default_scale:.2}"))
+                                .small()
+                                .weak(),
+                        );
+                    });
                     egui::Grid::new("body_props")
                         .num_columns(2)
                         .spacing([20.0, 4.0])

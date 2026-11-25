@@ -20,6 +20,18 @@ pub struct Body {
     pub color: [u8; 3],
 }
 
+impl Body {
+    /// Граница «звезда/планета» по массе. В пресетах звёзды массивнее 100,
+    /// планеты — заметно легче, поэтому порог отделяет солнце от планет.
+    pub const STAR_MASS: f64 = 100.0;
+
+    /// Звезда ли это (солнце): такие тела не масштабируются настройкой
+    /// размера планет.
+    pub fn is_star(&self) -> bool {
+        self.mass >= Self::STAR_MASS
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Algorithm {
     #[default]
@@ -698,11 +710,24 @@ pub fn predict_path(
         profiler: super::profiler::Profiler::new(),
     };
     let mut path = Vec::with_capacity(steps);
+    let mut prev = sim.bodies.get(focus).map(|b| b.pos).unwrap_or(Vec3::ZERO);
     for _ in 0..steps {
         sim.step();
-        if let Some(b) = sim.bodies.get(focus) {
-            path.push(b.pos);
+        let Some(b) = sim.bodies.get(focus) else {
+            break;
+        };
+        let cur = b.pos;
+        let hit = path_hits_body(&sim.bodies, focus, prev, cur);
+        path.push(cur);
+        if hit {
+            // Обрыв на последнем шаге: оставляем точку перед столкновением,
+            // чтобы UI мог отличить его по длине пути.
+            if path.len() == steps && steps > 0 {
+                path.pop();
+            }
+            break;
         }
+        prev = cur;
     }
     path
 }
@@ -739,11 +764,117 @@ pub fn predict_paths(bodies: &[Body], params: SimParams, steps: usize, dt: f64) 
         profiler: super::profiler::Profiler::new(),
     };
     let mut paths: Vec<Vec<Vec3>> = vec![Vec::with_capacity(steps); bodies.len()];
+    let mut prev: Vec<Vec3> = sim.bodies.iter().map(|b| b.pos).collect();
+    let mut ended = vec![false; bodies.len()];
     for _ in 0..steps {
         sim.step();
-        for (path, b) in paths.iter_mut().zip(sim.bodies.iter()) {
-            path.push(b.pos);
+        let mut cur = Vec::with_capacity(bodies.len());
+        for (i, b) in sim.bodies.iter().enumerate() {
+            if !ended[i] {
+                let hit = path_hits_body(&sim.bodies, i, prev[i], b.pos);
+                paths[i].push(b.pos);
+                if hit {
+                    ended[i] = true;
+                    if paths[i].len() == steps && steps > 0 {
+                        paths[i].pop();
+                    }
+                }
+            }
+            cur.push(b.pos);
         }
+        prev = cur;
     }
     paths
+}
+
+/// Траектория-предсказание упирается в другое тело: отрезок `prev → cur`
+/// проходит ближе суммы радиусов. Проверка по отрезку, а не по точке, —
+/// иначе при крупном шаге тело «проскакивает» сквозь маленькое.
+fn path_hits_body(bodies: &[Body], index: usize, prev: Vec3, cur: Vec3) -> bool {
+    if !prev.is_finite() || !cur.is_finite() {
+        return true;
+    }
+    let Some(me) = bodies.get(index) else {
+        return true;
+    };
+    let seg = cur - prev;
+    let len2 = seg.len2();
+    for (j, other) in bodies.iter().enumerate() {
+        if j == index || !other.pos.is_finite() {
+            continue;
+        }
+        let t = if len2 > 1e-18 {
+            ((other.pos - prev).dot(seg) / len2).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let closest = prev + seg * t;
+        let hit_radius = me.radius.max(0.0) + other.radius.max(0.0);
+        if (closest - other.pos).len() <= hit_radius {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod predict_tests {
+    use super::*;
+
+    fn falling_pair() -> Vec<Body> {
+        vec![
+            Body {
+                id: 1,
+                mass: 1000.0,
+                pos: Vec3::ZERO,
+                vel: Vec3::ZERO,
+                radius: 10.0,
+                color: [255, 220, 120],
+            },
+            Body {
+                id: 2,
+                mass: 1.0,
+                pos: Vec3::new(30.0, 0.0, 0.0),
+                vel: Vec3::ZERO,
+                radius: 2.0,
+                color: [120, 200, 255],
+            },
+        ]
+    }
+
+    fn params() -> SimParams {
+        SimParams {
+            g: 1.0,
+            dt: 0.02,
+            softening: 0.0,
+            ..SimParams::default()
+        }
+    }
+
+    #[test]
+    fn single_path_stops_at_collision() {
+        let bodies = falling_pair();
+        let p = params();
+        let steps = 1000;
+        let path = predict_path(&bodies, p, 1, steps, p.dt);
+        assert!(path.len() < steps, "path was not truncated: {}", path.len());
+        let last = path.last().unwrap();
+        let d = (*last - bodies[0].pos).len();
+        assert!(d <= 12.0 + 1e-6, "last point is outside the star: {d}");
+    }
+
+    #[test]
+    fn all_paths_stop_at_collision_independently() {
+        let bodies = falling_pair();
+        let p = params();
+        let steps = 1000;
+        let paths = predict_paths(&bodies, p, steps, p.dt);
+        // Оба тела идут навстречу и сталкиваются — путь каждого обрывается.
+        assert!(paths[0].len() < steps, "star path was not truncated");
+        assert!(paths[1].len() < steps, "falling body was not truncated");
+        let last0 = paths[0].last().unwrap();
+        let last1 = paths[1].last().unwrap();
+        let d = (*last0 - *last1).len();
+        assert!(d <= 12.0 + 1e-6, "paths do not meet at the collision: {d}");
+    }
 }

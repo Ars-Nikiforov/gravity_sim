@@ -82,6 +82,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         app.prediction = None;
         app.orbits.clear();
         app.orbits_tick = 0;
+        app.body_scale.clear();
         app.selection.clear();
         app.selected_id = None;
         app.orbit_host = None;
@@ -103,6 +104,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
     let cam3 = app.cam3d;
     let (g, softening) = (app.params.g, app.params.softening);
     let view3d = app.view3d;
+    let planet_size = app.planet_size;
 
     let project = move |p: Vec3| -> Option<Projected> {
         if view3d {
@@ -208,7 +210,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 .copied()
                 .unwrap_or(egui::Color32::LIGHT_BLUE)
         };
-        for (id, path) in &app.orbits {
+        for (id, path, truncated) in &app.orbits {
             if path.len() < 2 {
                 continue;
             }
@@ -238,15 +240,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     ));
                 }
             }
-            if let (Some(last), Some(body)) = (path.last(), bodies.iter().find(|b| b.id == *id)) {
-                if let (Some(pl), Some(pb)) = (
-                    project(*last).map(|pr| pr.pos),
-                    project(body.pos).map(|pr| pr.pos),
-                ) {
-                    // Точка-маркер конца пути (куда прилетит тело).
-                    painter.circle_filled(pl, 2.0, color.gamma_multiply(0.5));
-                    if is_focus {
-                        painter.line_segment([pb, pl], egui::Stroke::new(0.8, color.gamma_multiply(0.35)));
+            if let Some(last) = path.last() {
+                if let Some(pl) = project(*last).map(|pr| pr.pos) {
+                    if *truncated {
+                        // Путь оборвался столкновением: «колечко» — дальше
+                        // судьба тела неизвестна.
+                        painter.circle_stroke(
+                            pl,
+                            5.0,
+                            egui::Stroke::new(1.5, color.gamma_multiply(0.95)),
+                        );
+                        painter.circle_filled(pl, 1.2, color.gamma_multiply(0.5));
+                    } else {
+                        // Точка-маркер конца пути (куда прилетит тело).
+                        painter.circle_filled(pl, 2.0, color.gamma_multiply(0.5));
                     }
                 }
             }
@@ -289,7 +296,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 }
             }
             if let Some(last) = pts.last() {
-                painter.circle_filled(*last, 3.0, color);
+                if pred.truncated {
+                    // Столкновение: путь оборван, дальнейшее неизвестно.
+                    painter.circle_stroke(
+                        *last,
+                        7.0,
+                        egui::Stroke::new(1.8, color.gamma_multiply(0.95)),
+                    );
+                    painter.circle_filled(*last, 1.5, color.gamma_multiply(0.5));
+                } else {
+                    painter.circle_filled(*last, 3.0, color);
+                }
             }
         }
     }
@@ -350,7 +367,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
         } else {
             cam.zoom
         };
-        let radius = (body.radius * scale).clamp(2.0, rect.height().max(1.0) as f64 * 1.5) as f32;
+        // Планеты рисуем крупнее (общая настройка + индивидуальная), солнце
+        // без изменений, если ему не задан собственный множитель.
+        let visual_radius = body.radius * app.body_display_scale(body);
+        let radius = (visual_radius * scale).clamp(2.0, rect.height().max(1.0) as f64 * 1.5) as f32;
         if !radius.is_finite() {
             continue;
         }
@@ -370,7 +390,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
 
         if app.view3d {
             // Мягкое свечение — читается как объёмное тело, а не точка.
-            let glow = if body.mass >= 100.0 { 2.4 } else { 1.8 };
+            let glow = if body.is_star() { 2.4 } else { 1.8 };
             painter.circle_filled(sp, radius * glow, base.gamma_multiply(0.10 * fog));
             painter.circle_filled(sp, radius, color);
             // Блик — читается как освещённая сфера, а не плоский кружок.
@@ -386,7 +406,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             );
         } else {
             painter.circle_filled(sp, radius, color);
-            if body.mass >= 100.0 {
+            if body.is_star() {
                 painter.circle_filled(sp, radius * 0.55, egui::Color32::WHITE);
             }
         }
@@ -447,6 +467,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             rect,
             &bodies,
             &mut app.well,
+            &app.body_scale,
+            planet_size,
         ));
     }
 

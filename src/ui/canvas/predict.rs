@@ -15,7 +15,14 @@ pub struct Prediction {
     pub id: u64,
     pub tick: u64,
     pub pts: Vec<Vec3>,
+    /// Путь оборвался столкновением (или расходимостью) — рисуем кольцо.
+    pub truncated: bool,
 }
+
+/// До какого числа тел орбиты считаются с индивидуальным шагом на каждое
+/// тело (отдельная симуляция). Дальше — одна общая симуляция: иначе
+/// предсказание всех орбит в больших системах слишком дорогое.
+const ORBIT_PER_BODY_LIMIT: usize = 32;
 
 /// Подтягиваем камеру к цели слежения, автоцентру и автомасштабу.
 /// Сглаживание экспоненциальное и не зависит от частоты кадров.
@@ -149,19 +156,29 @@ fn robust_radius(bodies: &[Body], center: Vec3, use_z: bool) -> f64 {
 /// Шаг и число точек предсказания. Горизонт подбирается по орбитальному
 /// периоду вокруг самого влиятельного тела: иначе у быстрой планеты
 /// «призрак» оказывается коротким огрызком, а не орбитой.
-fn predict_step(app: &GravityApp, bodies: &[Body], focus: usize) -> (usize, f64) {
+fn predict_step(
+    params: &crate::physics::SimParams,
+    bodies: &[Body],
+    focus: usize,
+) -> (usize, f64) {
     let steps = if bodies.len() > 150 {
         PREDICT_STEPS / 2
     } else {
         PREDICT_STEPS
     };
-    let base = (app.params.dt * PREDICT_DT_SCALE).max(0.005);
-    let b = &bodies[focus];
+    let base = (params.dt * PREDICT_DT_SCALE).max(0.005);
+    let Some(b) = bodies.get(focus) else {
+        return (steps, base * 4.0);
+    };
 
-    // Доминирующее тело — максимальный вклад m/r².
+    // Доминирующее тело — максимальный вклад m/r². Скорость берём
+    // относительную: в барицентрической системе абсолютная скорость тела
+    // включает движение самого притягивающего центра, и энергия орбиты
+    // получается завышенной (орбита «улетает»).
     let mut best = 0.0_f64;
     let mut m_in = 0.0_f64;
     let mut r_min = f64::INFINITY;
+    let mut attractor_vel = Vec3::ZERO;
     for (i, o) in bodies.iter().enumerate() {
         if i == focus {
             continue;
@@ -172,26 +189,34 @@ fn predict_step(app: &GravityApp, bodies: &[Body], focus: usize) -> (usize, f64)
             best = influence;
             m_in = o.mass;
             r_min = r;
+            attractor_vel = o.vel;
         }
     }
 
-    let g = app.params.g;
+    let g = params.g;
     if !(g > 0.0) || m_in <= 0.0 || !r_min.is_finite() {
         return (steps, base * 4.0);
     }
 
-    let mu = g * m_in;
+    // Полная масса пары: для звезды, «обращающейся» вокруг планеты, это даёт
+    // период самой планеты, а не в sqrt(M/m) раз больший.
+    let mu = g * (m_in + b.mass.max(0.0));
     // Период круговой орбиты на текущем радиусе: T = 2π·sqrt(r³/μ).
     let period = std::f64::consts::TAU * (r_min * r_min * r_min / mu).sqrt();
     // Гипербола/парабола: периода нет — берём умеренный горизонт.
-    let energy = 0.5 * b.vel.len2() - mu / r_min;
+    let rel_v2 = (b.vel - attractor_vel).len2();
+    let energy = 0.5 * rel_v2 - mu / r_min;
     let horizon = if energy >= 0.0 || !period.is_finite() {
         base * steps as f64 * 0.5
     } else {
         // ~85% орбиты: видно форму и направление, без лишнего «хвоста».
         period * 0.85
     };
-    let dt = (horizon / steps as f64).clamp(base, base * 80.0);
+    // Нижняя граница — не мельче шага симуляции. Верхнюю не ставим:
+    // horizon/steps всегда ~0.85 периода на 320 шагов, поэтому шаг устойчив
+    // при любом масштабе времени (а прежний потолок делал шаг слишком
+    // крупным для быстрых внутренних тел).
+    let dt = (horizon / steps as f64).max(base);
     (steps, dt)
 }
 
@@ -220,8 +245,34 @@ pub(super) fn update_orbits(app: &mut GravityApp, bodies: &[Body], tick: u64) {
         app.orbits.clear();
         return;
     };
-    let (steps, dt) = predict_step(app, bodies, focus);
-    let paths = crate::physics::predict_paths(bodies, app.params, steps, dt);
+    let paths: Vec<(Vec<Vec3>, bool)> = if bodies.len() <= ORBIT_PER_BODY_LIMIT {
+        // Небольшие системы: у каждого тела свой шаг и свой горизонт,
+        // поэтому каждая орбита выглядит цельной и не «петляет».
+        (0..bodies.len())
+            .map(|i| {
+                let (steps, dt) = predict_step(&app.params, bodies, i);
+                let pts = crate::physics::predict_path(bodies, app.params, i, steps, dt);
+                let truncated = pts.len() < steps;
+                (pts, truncated)
+            })
+            .collect()
+    } else {
+        // Большие системы: одна симуляция вперёд. Шаг — самый мелкий из
+        // устойчивых, иначе быстрые внутренние тела рисуются петлями.
+        let (focus_steps, focus_dt) = predict_step(&app.params, bodies, focus);
+        let dt = (0..bodies.len())
+            .map(|i| predict_step(&app.params, bodies, i).1)
+            .fold(focus_dt, f64::min);
+        let horizon = focus_steps as f64 * focus_dt;
+        let steps = (horizon / dt).round().clamp(160.0, 800.0) as usize;
+        crate::physics::predict_paths(bodies, app.params, steps, dt)
+            .into_iter()
+            .map(|pts| {
+                let truncated = pts.len() < steps;
+                (pts, truncated)
+            })
+            .collect()
+    };
 
     // Кому рисовать: всем, либо (в скоплениях) самым массивным + выделенным.
     let mut keep: Option<HashSet<u64>> = None;
@@ -244,7 +295,7 @@ pub(super) fn update_orbits(app: &mut GravityApp, bodies: &[Body], tick: u64) {
         .into_iter()
         .zip(bodies.iter())
         .filter(|(_, b)| keep.as_ref().is_none_or(|k| k.contains(&b.id)))
-        .map(|(path, b)| (b.id, path))
+        .map(|((path, truncated), b)| (b.id, path, truncated))
         .collect();
     app.orbits_tick = tick;
 }
@@ -267,8 +318,48 @@ pub(super) fn update_prediction(app: &mut GravityApp, bodies: &[Body], tick: u64
         app.prediction = None;
         return;
     };
-    let (steps, dt) = predict_step(app, bodies, focus);
+    let (steps, dt) = predict_step(&app.params, bodies, focus);
     let pts = crate::physics::predict_path(bodies, app.params, focus, steps, dt);
-    app.prediction = Some(Prediction { id: sel, tick, pts });
+    let truncated = pts.len() < steps;
+    app.prediction = Some(Prediction {
+        id: sel,
+        tick,
+        pts,
+        truncated,
+    });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::{Scenario, SimParams, presets};
+
+    #[test]
+    fn planet_prediction_follows_current_orbit() {
+        let bodies = presets::generate(Scenario::SolarSystem, 1.0);
+        let params = SimParams::default();
+        let focus = bodies.iter().position(|b| b.id == 2).unwrap();
+        let (steps, dt) = predict_step(&params, &bodies, focus);
+        let pts = crate::physics::predict_path(&bodies, params, focus, steps, dt);
+        assert_eq!(pts.len(), steps);
+        let sun = bodies.iter().find(|b| b.id == 1).unwrap();
+        let r0 = (bodies[focus].pos - sun.pos).len();
+        // The ghost starts where the body is now.
+        assert!((pts[0] - bodies[focus].pos).len() < r0 * 0.05);
+        // And stays near the circular orbit instead of spiralling away.
+        for p in &pts {
+            let r = (*p - sun.pos).len();
+            assert!(r > r0 * 0.5 && r < r0 * 1.5, "r={r} r0={r0}");
+        }
+    }
+
+    #[test]
+    fn star_focus_uses_pair_mass() {
+        let bodies = presets::generate(Scenario::SolarSystem, 1.0);
+        let params = SimParams::default();
+        // For the star the dominant body is a planet; the old formula used only
+        // the planet mass and inflated the step to base*80.
+        let (_, dt) = predict_step(&params, &bodies, 0);
+        assert!(dt < params.dt * 80.0);
+    }
+}

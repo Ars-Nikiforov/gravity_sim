@@ -194,6 +194,8 @@ pub fn draw(
     canvas_rect: egui::Rect,
     bodies: &[Body],
     state: &mut WellState,
+    body_scale: &std::collections::HashMap<u64, f64>,
+    planet_size: f64,
 ) -> egui::Rect {
     let margin = 10.0;
     // Не вылезаем за холст при маленьком окне — мини-вид сжимается.
@@ -369,13 +371,14 @@ pub fn draw(
         if !rect.contains(p) {
             continue;
         }
-        let r = ((b.radius * scale * 0.9) as f32).clamp(2.0, 12.0);
+        let visual_radius = b.radius * crate::app::effective_body_scale(b, body_scale, planet_size);
+        let r = ((visual_radius * scale * 0.9) as f32).clamp(2.0, 12.0);
         painter.circle_filled(
             p,
             r,
             egui::Color32::from_rgb(b.color[0], b.color[1], b.color[2]),
         );
-        if b.mass >= 100.0 {
+        if b.is_star() {
             painter.circle_filled(p, r * 0.55, egui::Color32::WHITE);
         }
     }

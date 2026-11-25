@@ -117,6 +117,29 @@ impl FocusMode {
     ];
 }
 
+/// Множитель радиуса планет по умолчанию: планеты рисуются вдвое крупнее,
+/// чтобы их было видно рядом с солнцем.
+pub const DEFAULT_PLANET_SIZE: f64 = 2.0;
+
+/// Размер тела по умолчанию: звёзды рисуются как есть, планеты — с общим
+/// множителем `planet_size`.
+pub fn default_body_scale(body: &Body, planet_size: f64) -> f64 {
+    if body.is_star() { 1.0 } else { planet_size }
+}
+
+/// Итоговый множитель размера тела: индивидуальное значение из таблицы,
+/// иначе значение по умолчанию.
+pub fn effective_body_scale(
+    body: &Body,
+    overrides: &HashMap<u64, f64>,
+    planet_size: f64,
+) -> f64 {
+    overrides
+        .get(&body.id)
+        .copied()
+        .unwrap_or_else(|| default_body_scale(body, planet_size))
+}
+
 /// Параметры тела, создаваемого инструментом «Добавить тело».
 #[derive(Clone, Copy, Debug)]
 pub struct NewBodyParams {
@@ -148,6 +171,11 @@ pub struct GravityApp {
     pub scenario: Scenario,
     pub tool: Tool,
     pub new_body: NewBodyParams,
+    /// Множитель радиуса планет по умолчанию (солнце/звёзды не меняются).
+    pub planet_size: f64,
+    /// Индивидуальные множители размера тел: id → ×. Если тела нет в
+    /// таблице, берётся значение по умолчанию.
+    pub body_scale: HashMap<u64, f64>,
 
     pub show_left: bool,
     pub show_right: bool,
@@ -189,8 +217,8 @@ pub struct GravityApp {
     /// Сливать орбиты мелких тел в скоплениях: рисовать только для
     /// самых массивных, иначе сотни путей сливаются в шум.
     pub merge_small_orbits: bool,
-    /// Кэш орбит-предсказаний: (id тела, путь) + тик пересчёта.
-    pub orbits: Vec<(u64, Vec<Vec3>)>,
+    /// Кэш орбит-предсказаний: (id тела, путь, оборван ли столкновением).
+    pub orbits: Vec<(u64, Vec<Vec3>, bool)>,
     pub orbits_tick: u64,
 
     // ── Логирование и повтор ─────────────────────────────────────
@@ -242,6 +270,8 @@ impl GravityApp {
                 radius: 3.0,
                 color: [120, 200, 255],
             },
+            planet_size: DEFAULT_PLANET_SIZE,
+            body_scale: HashMap::new(),
             show_left: true,
             show_right: true,
             show_trails: true,
@@ -280,8 +310,7 @@ impl GravityApp {
             load_path: String::new(),
             replay_error: None,
             selected_id: None,
-            camera: Camera::default(),
-            trails: HashMap::new(),
+            camera: Camera::default(),            trails: HashMap::new(),
             fps: 0.0,
             show_gallery: false,
             frame_pending: true,
@@ -290,6 +319,11 @@ impl GravityApp {
             thumbnails: HashMap::new(),
             gen_spec: StableSystemSpec::default(),
         }
+    }
+
+    /// Множитель размера конкретного тела (индивидуальный или по умолчанию).
+    pub fn body_display_scale(&self, body: &Body) -> f64 {
+        effective_body_scale(body, &self.body_scale, self.planet_size)
     }
 
 }
