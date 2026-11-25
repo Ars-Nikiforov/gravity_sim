@@ -19,6 +19,19 @@ pub struct StageStat {
     pub count: u64,
 }
 
+/// Измерить время выполнения `f`: свободная функция, не заимствует ни структуру,
+/// ни профилировщик — замыкание может свободно владеть `&mut self`.
+/// Возвращает результат и затраченное время в мс.
+pub fn timed<F, R>(f: F) -> (R, f64)
+where
+    F: FnOnce() -> R,
+{
+    let start = Instant::now();
+    let r = f();
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+    (r, elapsed)
+}
+
 /// Профилировщик шага физики. Живёт в потоке физики; после каждого шага
 /// его снимок копируется в Snapshot — UI лишь читает.
 #[derive(Clone, Debug, Default)]
@@ -31,42 +44,25 @@ impl Profiler {
         Self::default()
     }
 
-    /// Измерить время выполнения `f` под именем `name` и обновить статистику.
-    pub fn measure<F, R>(&mut self, name: &'static str, f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        let start = Instant::now();
-        let r = f();
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-
+    /// Записать ранее измеренное время этапа (в мс) в статистику.
+    pub fn record(&mut self, name: &'static str, elapsed_ms: f64) {
         if let Some(st) = self.stages.iter_mut().find(|s| s.name == name) {
-            st.last_ms = elapsed;
+            st.last_ms = elapsed_ms;
             st.count += 1;
-            st.avg_ms = st.avg_ms * 0.9 + elapsed * 0.1;
-            st.max_ms = st.max_ms.max(elapsed);
+            st.avg_ms = st.avg_ms * 0.9 + elapsed_ms * 0.1;
+            st.max_ms = st.max_ms.max(elapsed_ms);
         } else {
             self.stages.push(StageStat {
                 name,
-                last_ms: elapsed,
-                avg_ms: elapsed,
-                max_ms: elapsed,
+                last_ms: elapsed_ms,
+                avg_ms: elapsed_ms,
+                max_ms: elapsed_ms,
                 count: 1,
             });
         }
-        r
     }
 
     pub fn stages(&self) -> &[StageStat] {
         &self.stages
-    }
-
-    pub fn clear(&mut self) {
-        self.stages.clear();
-    }
-
-    /// Общая сумма средних по всем этапам, мс.
-    pub fn total_avg_ms(&self) -> f64 {
-        self.stages.iter().map(|s| s.avg_ms).sum()
     }
 }

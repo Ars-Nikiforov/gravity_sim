@@ -43,8 +43,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     ui.label(snapshot.bodies.len().to_string());
                     ui.end_row();
 
-                    if app.params.algorithm == Algorithm::FastMultipole {
-                        ui.label("Областей FMM:");
+                    if matches!(
+                        app.params.algorithm,
+                        Algorithm::FastMultipole | Algorithm::BarnesHut
+                    ) {
+                        ui.label("Областей дерева:");
                         ui.label(snapshot.regions.len().to_string());
                         ui.end_row();
                     }
@@ -202,6 +205,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                             .changed();
                     }
                 });
+                ui.checkbox(&mut app.show_regions, "Показать области на холсте");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Областей в последнем шаге: {}",
+                        snapshot.regions.len()
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+            if app.params.algorithm == Algorithm::BarnesHut {
+                ui.separator();
+                ui.label("Дерево Barnes-Hut:");
+                changed |= ui
+                    .add(egui::Slider::new(&mut app.params.bh_theta, 0.2..=1.2).text("Угол θ"))
+                    .on_hover_text("Меньше θ — больше узлов раскрывается, точнее и дороже.")
+                    .changed();
                 ui.checkbox(&mut app.show_regions, "Показать области на холсте");
                 ui.label(
                     egui::RichText::new(format!(

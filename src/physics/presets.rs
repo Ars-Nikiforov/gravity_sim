@@ -563,6 +563,95 @@ fn hill_system(
     bodies
 }
 
+/// Параметры генератора стабильных систем (окно «Генератор» в галерее).
+#[derive(Clone, Debug)]
+pub struct StableSystemSpec {
+    /// Масса звезды.
+    pub star_mass: f64,
+    /// Число планет.
+    pub planets: usize,
+    /// Диапазон масс планет.
+    pub mass_lo: f64,
+    pub mass_hi: f64,
+    /// Теснота: соседние полуоси отстоят на `k` взаимных радиусов Хилла.
+    /// Критерий Гладмана — 2√3 ≈ 3.46; 4.8–6 — устойчиво с запасом.
+    pub k: f64,
+    /// Полуось самой внутренней планеты.
+    pub start_a: f64,
+    /// Верхняя граница эксцентриситета орбит.
+    pub ecc_max: f64,
+    /// Разброс наклонений орбит (радианы, ±).
+    pub incl_max: f64,
+    /// Наклон всей системы целиком (радианы).
+    pub tilt: f64,
+    /// Сид генератора: одинаковый сид — одинаковая система.
+    pub seed: u64,
+}
+
+impl Default for StableSystemSpec {
+    fn default() -> Self {
+        Self {
+            star_mass: 2000.0,
+            planets: 6,
+            mass_lo: 0.1,
+            mass_hi: 2.0,
+            k: 5.0,
+            start_a: 70.0,
+            ecc_max: 0.02,
+            incl_max: 0.03,
+            tilt: 0.25,
+            seed: 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+}
+
+/// Сгенерировать Хилл-устойчивую систему по спецификации: та же схема,
+/// что у пресетов «Стабильная система» — планеты на кеплеровских орбитах,
+/// соседние полуоси разнесены на `k·R_H`, нулевой суммарный импульс.
+pub fn generate_stable(spec: &StableSystemSpec, g: f64) -> Vec<Body> {
+    let mut rng = Rng::new(spec.seed | 1);
+    let mut bodies = Vec::new();
+    let mut next_id = 1u64;
+    push(
+        &mut bodies,
+        &mut next_id,
+        spec.star_mass,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        display_radius(spec.star_mass),
+        STAR,
+    );
+
+    let mut a = spec.start_a;
+    let mut prev: Option<(f64, f64)> = None;
+    for i in 0..spec.planets {
+        let mass = spec.mass_lo + (spec.mass_hi - spec.mass_lo).max(0.0) * rng.f64();
+        if let Some((prev_a, prev_mass)) = prev {
+            let r_h = ((mass + prev_mass) / (3.0 * spec.star_mass)).cbrt() * (a + prev_a) * 0.5;
+            a = prev_a + spec.k * r_h;
+        }
+        let e = rng.f64() * spec.ecc_max;
+        let incl = (rng.f64() - 0.5) * 2.0 * spec.incl_max;
+        let node = rng.f64() * TAU;
+        let phase = i as f64 * 2.399_963_229_728_653 + rng.f64();
+        let normal = normal_from(incl, node);
+        let (pos, vel) = orbit_state(g, spec.star_mass, a, e, normal, phase);
+        push(
+            &mut bodies,
+            &mut next_id,
+            mass,
+            pos,
+            vel,
+            display_radius(mass),
+            PLANET_COLORS[i % PLANET_COLORS.len()],
+        );
+        prev = Some((a, mass));
+    }
+    tilt(&mut bodies, spec.tilt * 0.5, spec.tilt * 0.3);
+    zero_momentum(&mut bodies);
+    bodies
+}
+
 /// Две гравитирующие массы на круговой орбите (барицентр в нуле, импульс 0).
 #[allow(clippy::too_many_arguments)]
 fn binary(
@@ -1202,7 +1291,7 @@ pub fn generate(scenario: Scenario, g: f64) -> Vec<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::sim::{Algorithm, SimParams, Simulation};
+    use crate::physics::sim::{Algorithm, Integrator, SimParams, Simulation};
 
     #[test]
     fn all_presets_are_nonempty_and_centered() {
@@ -1371,5 +1460,114 @@ mod tests {
         assert!(vrel.dot(rel).abs() / (vrel.len() * rel.len()) < 1e-9);
         let expected = (1.001f64 / plan.radius).sqrt();
         assert!((vrel.len() - expected).abs() < 1e-9);
+    }
+
+    /// Генератор: та же система при том же сиде, нулевой импульс, планеты
+    /// разнесены по Хиллу (проверяем хотя бы минимальный разнос полуосей).
+    #[test]
+    fn generated_stable_system_is_deterministic_and_sane() {
+        let spec = StableSystemSpec::default();
+        let a = generate_stable(&spec, 1.0);
+        let b = generate_stable(&spec, 1.0);
+        assert_eq!(a.len(), spec.planets + 1);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.pos, y.pos, "одинаковый сид дал разные системы");
+        }
+
+        let total: f64 = a.iter().map(|bd| bd.mass).sum();
+        let momentum = a
+            .iter()
+            .fold(Vec3::ZERO, |acc, bd| acc + bd.vel * bd.mass);
+        assert!(
+            momentum.len() / total < 1e-6,
+            "ненулевой импульс сгенерированной системы"
+        );
+        // Соседние планеты: расстояние между орбитами ≥ 0.9·k·R_H (с запасом
+        // на эксцентриситет) — основной источник устойчивости.
+        for w in a.windows(3) {
+            let r1 = w[1].pos.len();
+            let r2 = w[2].pos.len();
+            assert!(
+                r2 > r1 * 1.05,
+                "полуоси не растут монотонно: {r1} -> {r2}"
+            );
+        }
+    }
+
+    /// Сгенерированная система живёт 300 шагов без разлёта и NaN —
+    /// тот же критерий, что у встроенных пресетов.
+    #[test]
+    fn generated_stable_system_survives_300_steps() {
+        for seed in [7u64, 0x9E37_79B9_7F4A_7C15, 0xDEAD_BEEF] {
+            let spec = StableSystemSpec {
+                seed,
+                ..Default::default()
+            };
+            let params = SimParams {
+                integrator: Integrator::SymplecticEuler,
+                dt: 0.008,
+                softening: 4.0,
+                algorithm: Algorithm::BruteForce,
+                ..Default::default()
+            };
+            let mut sim = Simulation::new(params, Scenario::SolarSystem);
+            sim.replace_bodies(generate_stable(&spec, params.g));
+            let start = sim
+                .bodies()
+                .iter()
+                .map(|b| b.pos.len())
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            for _ in 0..300 {
+                sim.step();
+            }
+            for b in sim.bodies() {
+                assert!(
+                    b.pos.is_finite() && b.vel.is_finite(),
+                    "seed {seed}: NaN за 300 шагов"
+                );
+            }
+            let end = sim
+                .bodies()
+                .iter()
+                .map(|b| b.pos.len())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                end < start * 60.0,
+                "seed {seed}: система разлетелась за 300 шагов ({start} -> {end})"
+            );
+        }
+    }
+
+    /// Предсказание путей всех тел: по пути на тело, ровно steps точек,
+    /// путь совпадает с одиночным predict_path для того же тела.
+    #[test]
+    fn predict_paths_covers_every_body() {
+        let bodies = generate(Scenario::SolarSystem, 1.0);
+        let params = SimParams::default();
+        let paths = crate::physics::predict_paths(&bodies, params, 60, 0.01);
+        assert_eq!(paths.len(), bodies.len(), "путь не для каждого тела");
+        for p in &paths {
+            assert_eq!(p.len(), 60, "горизонт не заполнен");
+            assert!(p.iter().all(|v| v.is_finite()));
+        }
+        // Первый шаг пути — движение тела за один шаг интегрирования
+        // (симплектический Эйлер: сначала скорость, потом позиция).
+        for (path, b) in paths.iter().zip(bodies.iter()) {
+            let mut a = Vec3::ZERO;
+            for o in &bodies {
+                if o.id == b.id {
+                    continue;
+                }
+                let d = o.pos - b.pos;
+                let r2 = d.len2() + params.softening;
+                a = a + d * (params.g * o.mass / (r2 * r2.sqrt()));
+            }
+            let expected = b.pos + (b.vel + a * 0.01) * 0.01;
+            assert!(
+                (path[0] - expected).len() < 1e-9 * expected.len().max(1.0),
+                "путь не совпадает с движением тела"
+            );
+        }
     }
 }

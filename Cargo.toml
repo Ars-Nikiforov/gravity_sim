@@ -14,3 +14,11 @@ egui = { version = "0.37", features = ["default_fonts"] }
 rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Тонкий LTO и один codegen-unit: физика — горячие циклы O(N²)/O(N log N),
+# инлайнинг через границы модулей даёт заметный буст в release.
+# panic = "abort" включать нельзя: main ловит панику wgpu ради
+# запасного glow-рендерера.
+[profile.release]
+lto = "thin"
+codegen-units = 1

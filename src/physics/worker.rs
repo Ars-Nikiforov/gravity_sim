@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use super::sim::{Body, Simulation};
 use super::vec::Vec3;
 use super::{profiler::StageStat, Region, Scenario, SimParams};
-use crate::logging::{BodyDelta, BodyLog, LogMode, LogRecord, RecordPayload};
+use crate::io::logging::{BodyDelta, BodyLog, LogMode, LogRecord, RecordPayload};
 
 /// Команды из интерфейса в поток физики.
 pub enum Command {
@@ -70,6 +70,8 @@ pub struct Snapshot {
     /// Листья мультипольного разбиения (пусто, если алгоритм не FMM).
     pub regions: Vec<Region>,
     /// Профилирование этапов последнего шага (имя, мс, количество).
+    /// UI пока не показывает панель этапов — поле в резерве, читается через отладку.
+    #[allow(dead_code)]
     pub profile: Vec<StageStat>,
 }
 
@@ -187,7 +189,7 @@ impl PhysicsWorker {
                             running: is_running,
                             epoch,
                             regions: sim.regions().to_vec(),
-                            profile: sim.profiler.stages().to_vec(),
+                            profile: sim.profiler_stages().to_vec(),
                         });
                         *thread_shared.snapshot.lock().unwrap() = snap;
                         ctx.request_repaint();

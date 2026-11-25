@@ -11,9 +11,8 @@
 //! снапшот и просыпается по `request_repaint` от потока физики.
 
 mod app;
-mod logging;
+mod io;
 mod physics;
-mod replay;
 mod ui;
 
 use eframe::egui;

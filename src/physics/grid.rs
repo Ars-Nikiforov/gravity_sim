@@ -12,6 +12,8 @@
 
 use std::collections::BTreeMap;
 
+use rayon::prelude::*;
+
 use super::sim::Body;
 use super::vec::Vec3;
 
@@ -75,39 +77,50 @@ pub fn accel_grid(bodies: &[Body], pos: &[Vec3], g: f64, softening: f64) -> Vec<
     }
 
     // Ближние ячейки — точный попарный расчёт; дальние — точечные массы.
-    for (key, cell) in &cells {
-        for &i in &cell.idxs {
-            let pi = pos[i];
-            let mut a = acc[i];
-            // 3×3×3 окрестность своей ячейки.
-            for dx in -1..=1i64 {
-                for dy in -1..=1i64 {
-                    for dz in -1..=1i64 {
-                        let near = cells.get(&(key.0 + dx, key.1 + dy, key.2 + dz));
-                        let Some(near) = near else { continue };
-                        for &j in &near.idxs {
-                            if i == j {
-                                continue;
-                            }
-                            let d = pos[j] - pi;
-                            let r2 = d.len2() + softening;
-                            a += d * (g * bodies[j].mass / (r2 * r2.sqrt()));
+    // Тело зависит только от ячеек, не от других тел, поэтому при большом
+    // числе тел строки считаются параллельно (детерминизм не меняется).
+    let body_cell: Vec<CellKey> = (0..n).map(|i| key_of(pos[i])).collect();
+    let sum_row = |i: usize| -> Vec3 {
+        let key = body_cell[i];
+        let pi = pos[i];
+        let mut a = Vec3::ZERO;
+        // 3×3×3 окрестность своей ячейки.
+        for dx in -1..=1i64 {
+            for dy in -1..=1i64 {
+                for dz in -1..=1i64 {
+                    let near = cells.get(&(key.0 + dx, key.1 + dy, key.2 + dz));
+                    let Some(near) = near else { continue };
+                    for &j in &near.idxs {
+                        if i == j {
+                            continue;
                         }
+                        let d = pos[j] - pi;
+                        let r2 = d.len2() + softening;
+                        a += d * (g * bodies[j].mass / (r2 * r2.sqrt()));
                     }
                 }
             }
-            // Остальные ячейки — как точечные массы в их центрах масс.
-            for (far_key, far) in &cells {
-                let (ddx, ddy, ddz) = (far_key.0 - key.0, far_key.1 - key.1, far_key.2 - key.2);
-                if ddx.abs() <= 1 && ddy.abs() <= 1 && ddz.abs() <= 1 {
-                    continue;
-                }
-                let d = far.com - pi;
-                let r2 = d.len2() + softening;
-                a += d * (g * far.mass / (r2 * r2.sqrt()));
-            }
-            acc[i] = a;
         }
+        // Остальные ячейки — как точечные массы в их центрах масс.
+        for (far_key, far) in &cells {
+            let (ddx, ddy, ddz) = (far_key.0 - key.0, far_key.1 - key.1, far_key.2 - key.2);
+            if ddx.abs() <= 1 && ddy.abs() <= 1 && ddz.abs() <= 1 {
+                continue;
+            }
+            let d = far.com - pi;
+            let r2 = d.len2() + softening;
+            a += d * (g * far.mass / (r2 * r2.sqrt()));
+        }
+        a
+    };
+    if n < 128 {
+        for i in 0..n {
+            acc[i] = sum_row(i);
+        }
+    } else {
+        acc.par_iter_mut().enumerate().for_each(|(i, a)| {
+            *a = sum_row(i);
+        });
     }
     acc
 }

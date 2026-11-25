@@ -65,6 +65,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
             ui.separator();
             ui.checkbox(&mut app.view3d, "3D-режим (перспектива)");
             ui.checkbox(&mut app.show_prediction, "Предсказание орбиты");
+            ui.checkbox(&mut app.show_orbits, "Орбиты всех тел (предсказание)");
+            if app.show_orbits {
+                ui.checkbox(&mut app.merge_small_orbits, "Сливать орбиты мелких тел");
+            }
             ui.checkbox(&mut app.show_trails, "Следы орбит");
             ui.checkbox(&mut app.show_labels, "Подписи тел");
             ui.checkbox(&mut app.show_forces, "Векторы сил");

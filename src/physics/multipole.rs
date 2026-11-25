@@ -51,17 +51,18 @@
 //! обход стека — тоже, поэтому одинаковая конфигурация даёт бит-в-бит
 //! одинаковый результат.
 
-use super::profiler::Profiler;
+use super::profiler::{self, Profiler};
 use super::sim::Body;
 use super::vec::Vec3;
 
-/// Максимум тел в листе.
-const MAX_LEAF: usize = 8;
-/// Максимальная глубина дерева — защита от вырожденных распределений.
-const MAX_DEPTH: u32 = 14;
-/// Сентинел «узла нет» / «листа нет».
-const NO_NODE: u32 = u32::MAX;
-const SQRT3: f64 = 1.732_050_807_568_877_2;
+/// Максимум тел в листе (общий с Barnes-Hut).
+pub(crate) const MAX_LEAF: usize = 8;
+/// Максимальная глубина дерева — защита от вырожденных распределений
+/// (общая с Barnes-Hut).
+pub(crate) const MAX_DEPTH: u32 = 14;
+/// Сентинел «узла нет» / «листа нет» (общий с Barnes-Hut).
+pub(crate) const NO_NODE: u32 = u32::MAX;
+pub(crate) const SQRT3: f64 = 1.732_050_807_568_877_2;
 
 /// Лист октодерева — область, которую можно показать на холсте.
 #[derive(Clone, Copy, Debug)]
@@ -262,13 +263,13 @@ impl MultipoleSolver {
         // RK4 двигает только пробные точки: источники внутри шага неизменны.
         // Поэтому дерево, моменты и списки строятся один раз на шаг.
         if !self.cache_matches(bodies, g, theta) {
-            self.profiler.measure("FMM: дерево", || {
+            let ((), tree_ms) = profiler::timed(|| {
                 self.prepare_sources(bodies, g);
                 self.build(bodies, g);
             });
-            self.profiler.measure("FMM: списки", || {
-                self.build_interaction_lists(theta);
-            });
+            self.profiler.record("FMM: дерево", tree_ms);
+            let ((), lists_ms) = profiler::timed(|| self.build_interaction_lists(theta));
+            self.profiler.record("FMM: списки", lists_ms);
             self.cached_g = g;
             self.cached_theta = theta;
             self.cache_valid = true;
@@ -276,9 +277,10 @@ impl MultipoleSolver {
 
         // Основной путь: обход по листьям. Далёкий узел загружается один раз
         // и применяется ко всем целям листа, ближнее тело — тоже.
-        self.profiler.measure("FMM: расчёт сил", || {
+        let ((), force_ms) = profiler::timed(|| {
             self.sum_leaves(positions, softening, order);
         });
+        self.profiler.record("FMM: расчёт сил", force_ms);
 
         // Точки сверх числа тел (нестандартный вызов) считаем точечно.
         for i in bodies.len()..positions.len() {
@@ -660,8 +662,9 @@ pub fn accel_multipole(
     MultipoleSolver::default().accel(bodies, positions, g, softening, theta, order)
 }
 
+/// Октант точки относительно центра узла (общий с Barnes-Hut).
 #[inline]
-fn octant(p: Vec3, center: Vec3) -> usize {
+pub(crate) fn octant(p: Vec3, center: Vec3) -> usize {
     let mut k = 0;
     if p.x >= center.x {
         k |= 1;
@@ -685,7 +688,8 @@ fn well_separated(node: &Node, center: Vec3, half: f64, theta: f64) -> bool {
     (node.center - center).len2() > reach * reach / (theta * theta)
 }
 
-fn bounds(bodies: &[Body]) -> (Vec3, f64) {
+/// Куб, охватывающий все тела (общий с Barnes-Hut).
+pub(crate) fn bounds(bodies: &[Body]) -> (Vec3, f64) {
     let mut min = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
     let mut max = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for b in bodies {

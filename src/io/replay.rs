@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::logging::{BodyLog, LogRecord, RecordPayload};
+use crate::io::logging::{BodyLog, LogRecord, RecordPayload};
 use crate::physics::Body;
 
 /// Одно полное состояние из лога.

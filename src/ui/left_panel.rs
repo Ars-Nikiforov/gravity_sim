@@ -152,6 +152,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                         .weak(),
                 );
             }
+            ui.checkbox(&mut app.show_orbits, "Орбиты всех тел (предсказание)")
+                .on_hover_text("Одна симуляция вперёд: путь каждого тела, яркость затухает к концу");
+            if app.show_orbits {
+                ui.checkbox(&mut app.merge_small_orbits, "Сливать орбиты мелких тел")
+                    .on_hover_text(format!(
+                        "В системах с >{} телами рисовать пути только {} самым \
+                         массивным и выделенным",
+                        crate::ui::canvas::ORBIT_BODY_LIMIT,
+                        crate::ui::canvas::ORBIT_TOP_MASSIVE
+                    ));
+            }
             ui.checkbox(&mut app.show_forces, "Векторы сил");
             ui.checkbox(&mut app.show_field_heatmap, "Тепловая карта поля");
             if app.show_field_heatmap {
@@ -186,8 +197,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                 );
             }
             ui.checkbox(&mut app.show_well3d, "3D-колодец (угол, в 2D)");
-            if app.params.algorithm == crate::physics::Algorithm::FastMultipole {
-                ui.checkbox(&mut app.show_regions, "Показывать области FMM");
+            if matches!(
+                app.params.algorithm,
+                crate::physics::Algorithm::FastMultipole | crate::physics::Algorithm::BarnesHut
+            ) {
+                ui.checkbox(&mut app.show_regions, "Показывать области дерева");
             }
             ui.horizontal(|ui| {
                 ui.label("Раскраска:");
@@ -264,9 +278,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GravityApp) {
                     .selected_text(app.log_mode.name())
                     .show_ui(ui, |ui| {
                         for mode in [
-                            crate::logging::LogMode::Off,
-                            crate::logging::LogMode::Deltas,
-                            crate::logging::LogMode::Full,
+                            crate::io::logging::LogMode::Off,
+                            crate::io::logging::LogMode::Deltas,
+                            crate::io::logging::LogMode::Full,
                         ] {
                             ui.selectable_value(&mut app.log_mode, mode, mode.name());
                         }

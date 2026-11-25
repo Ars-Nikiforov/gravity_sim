@@ -10,13 +10,181 @@
 
 use eframe::egui;
 
+use super::canvas::Projected;
 use crate::app::WellState;
-use crate::physics::{Body, Vec2};
+use crate::physics::{Body, Vec2, Vec3};
 
 /// Размер мини-вью по умолчанию.
 const SIZE: egui::Vec2 = egui::Vec2::new(250.0, 180.0);
 /// Плотность сетки (N×N ячеек).
 const MESH: usize = 16;
+/// Плотность сетки «резины» в основной сцене (N×N ячеек).
+const SCENE_MESH: usize = 22;
+/// Порог числа тел, после которого сценовая сетка прореживается.
+const SCENE_MESH_DENSE: usize = 500;
+/// Плотность сетки при большом числе тел.
+const SCENE_MESH_DENSE_N: usize = 14;
+
+/// Поле глубин «гравитационного колодца»: область мира и нормировка,
+/// общие для мини-вида и сценовой сетки.
+pub struct WellField {
+    /// Центр области (барицентр тел по xy).
+    pub center: Vec2,
+    /// Половина стороны квадратной области мира.
+    pub half: f64,
+    /// Смягчение поля (масштаб тел).
+    soft: f64,
+    /// Нормировочный множитель: z = Σ m/r · norm.
+    norm: f64,
+    /// Потолок глубины (мировые единицы).
+    max_depth: f64,
+}
+
+impl WellField {
+    /// Поле по телам; глубина под самым массивным телом ≈ `dip_fraction`
+    /// от радиуса области (90-й перцентиль расстояний).
+    pub fn new(bodies: &[Body], dip_fraction: f64) -> Self {
+        // Центр — барицентр тел (только xy).
+        let (mut m_sum, mut cx, mut cy) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for b in bodies {
+            let m = if b.mass.is_finite() {
+                b.mass.max(1e-9)
+            } else {
+                1e-9
+            };
+            m_sum += m;
+            cx += b.pos.x * m;
+            cy += b.pos.y * m;
+        }
+        let center = if m_sum > 1e-12 && cx.is_finite() && cy.is_finite() {
+            Vec2::new(cx / m_sum, cy / m_sum)
+        } else {
+            Vec2::ZERO
+        };
+
+        // Устойчивый радиус: 90-й перцентиль расстояний — одиночные выбросы
+        // не раздувают область до бесконечности.
+        let mut distances: Vec<f64> = bodies
+            .iter()
+            .map(|b| (b.pos.xy() - center).len() + b.radius)
+            .filter(|d| d.is_finite())
+            .collect();
+        distances.sort_by(|a, b| a.total_cmp(b));
+        let radius = if distances.is_empty() {
+            400.0
+        } else {
+            let idx = ((distances.len() as f64 * 0.9) as usize).min(distances.len() - 1);
+            distances[idx].clamp(80.0, 1.0e6)
+        };
+
+        let soft = (radius * 0.06).max(1e-6);
+        let heaviest = bodies
+            .iter()
+            .map(|b| if b.mass.is_finite() { b.mass } else { 0.0 })
+            .fold(0.0_f64, f64::max)
+            .max(1e-9);
+        let dip = radius * dip_fraction;
+        Self {
+            center,
+            half: radius * 1.15,
+            soft,
+            norm: dip * soft / heaviest,
+            max_depth: dip * 1.2,
+        }
+    }
+
+    /// Глубина прогиба в точке (мировые единицы, вниз от плоскости z = 0).
+    pub fn depth(&self, bodies: &[Body], x: f64, y: f64) -> f64 {
+        let mut d = 0.0;
+        for b in bodies {
+            let dx = x - b.pos.x;
+            let dy = y - b.pos.y;
+            let r2 = dx * dx + dy * dy + self.soft * self.soft;
+            if r2 > 1e-12 && r2.is_finite() {
+                d += b.mass / r2.sqrt();
+            }
+        }
+        let z = d * self.norm;
+        if z.is_finite() {
+            z.clamp(0.0, self.max_depth)
+        } else {
+            0.0
+        }
+    }
+
+    /// Цвет линии по глубине: глубже впадина — ярче.
+    fn line_color(&self, depth: f64) -> egui::Color32 {
+        let t = (depth / self.max_depth).clamp(0.0, 1.0) as f32;
+        let alpha = 50.0 + t * 150.0;
+        egui::Color32::from_rgba_unmultiplied(
+            (70.0 + t * 120.0) as u8,
+            (130.0 + t * 60.0) as u8,
+            230,
+            alpha as u8,
+        )
+    }
+}
+
+/// «Резина» в основной 3D-сцене: сетка на плоскости z = 0, прогнутая вниз
+/// под телами, спроецированная камерой холста. Глубина под самым массивным
+/// телом — около 30% радиуса области.
+pub fn draw_scene(
+    painter: &egui::Painter,
+    project: &dyn Fn(Vec3) -> Option<Projected>,
+    bodies: &[Body],
+) {
+    if bodies.is_empty() {
+        return;
+    }
+    let field = WellField::new(bodies, 0.30);
+    let mesh = if bodies.len() > SCENE_MESH_DENSE {
+        SCENE_MESH_DENSE_N
+    } else {
+        SCENE_MESH
+    }
+    .max(SCENE_MESH_DENSE_N);
+
+    // Глубины всех узлов сетки — один проход по телам на узел.
+    let mut depths = vec![0.0_f64; (mesh + 1) * (mesh + 1)];
+    let world = |i: usize, len: f64| -> f64 { (i as f64 / mesh as f64 - 0.5) * 2.0 * len };
+    for gy in 0..=mesh {
+        for gx in 0..=mesh {
+            let ox = world(gx, field.half);
+            let oy = world(gy, field.half);
+            depths[gy * (mesh + 1) + gx] =
+                field.depth(bodies, field.center.x + ox, field.center.y + oy);
+        }
+    }
+    let point = |gx: usize, gy: usize| -> Option<Projected> {
+        let z = depths[gy * (mesh + 1) + gx];
+        project(Vec3::new(
+            field.center.x + world(gx, field.half),
+            field.center.y + world(gy, field.half),
+            -z,
+        ))
+    };
+
+    // Полилинии по строкам и столбцам; сегменты с непроектированными
+    // вершинами пропускаются, линия рвётся на части.
+    for gy in 0..=mesh {
+        for gx in 0..mesh {
+            if let (Some(a), Some(b)) = (point(gx, gy), point(gx + 1, gy)) {
+                let d = (depths[gy * (mesh + 1) + gx] + depths[gy * (mesh + 1) + gx + 1]) * 0.5;
+                painter.line_segment([a.pos, b.pos], egui::Stroke::new(1.0, field.line_color(d)));
+            }
+        }
+    }
+    for gx in 0..=mesh {
+        for gy in 0..mesh {
+            if let (Some(a), Some(b)) = (point(gx, gy), point(gx, gy + 1)) {
+                let d = (depths[gy * (mesh + 1) + gx]
+                    + depths[(gy + 1) * (mesh + 1) + gx])
+                    * 0.5;
+                painter.line_segment([a.pos, b.pos], egui::Stroke::new(1.0, field.line_color(d)));
+            }
+        }
+    }
+}
 
 /// Нарисовать колодец и вернуть его прямоугольник (чтобы основной холст
 /// не обрабатывал клики по этой области).
